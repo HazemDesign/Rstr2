@@ -150,6 +150,25 @@ bool Renderer::load_shader_bytecode(std::string& error) {
 }
 
 bool Renderer::init_dxr(std::string& error) {
+    // If a D3D12 debug layer happens to be active (injected by a GPU
+    // debugger/profiler such as PIX, Nsight Graphics, RenderDoc, or the
+    // Windows "Graphics Tools" feature), disable GPU-Based Validation. GBV
+    // performs extremely deep per-call validation that overflows the thread
+    // stack during resource/descriptor creation (STATUS_STACK_OVERFLOW).
+    // We never enable the debug layer ourselves; this only takes effect if it
+    // is already active, and is a harmless no-op otherwise.
+    {
+        Microsoft::WRL::ComPtr<ID3D12Debug> dbg;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) {
+            Microsoft::WRL::ComPtr<ID3D12Debug1> dbg1;
+            if (SUCCEEDED(dbg.As(&dbg1))) {
+                dbg1->SetEnableGPUBasedValidation(FALSE);
+                dbg1->SetEnableSynchronizedCommandQueueValidation(FALSE);
+                rlogf("Rstr2Core: debug layer present, disabled GPU-Based Validation");
+            }
+        }
+    }
+
     HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory_));
     if (FAILED(hr)) {
         error = "Rstr2: failed to create DXGI factory (HRESULT 0x" +
