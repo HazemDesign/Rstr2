@@ -217,6 +217,8 @@ bool Renderer::init_dxr(std::string& error) {
     if (FAILED(hr)) { error = "Rstr2: failed to create command list."; return false; }
     cmd_list_->Close();
 
+    descriptor_inc_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
     hr = device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_));
     if (FAILED(hr)) { error = "Rstr2: failed to create fence."; return false; }
     fence_event_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
@@ -229,11 +231,18 @@ bool Renderer::create_resources(std::string& error) {
     HRESULT hr;
     rlogf("Rstr2Core: create_resources begin\n");
 
-    // NOTE: No shader-visible descriptor heap is created. All resources (TLAS,
-    // vertices, indices, camera, output) are bound as root descriptors in
-    // render_frame. Creating views into a shader-visible heap (via
-    // CreateShaderResourceView/CreateUnorderedAccessView) triggered a driver
-    // stack overflow on the test GPU, so we avoid that path entirely.
+    // Shader-visible CBV_SRV_UAV heap with a single descriptor for the TLAS SRV.
+    // (Only the TLAS needs a heap view; everything else is a root descriptor.
+    // Creating MANY views into a shader-visible heap crashed the driver stack on
+    // the test GPU, so we keep this heap to one descriptor.)
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.NumDescriptors = 1;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    rlogf("Rstr2Core: create_resources heap\n");
+    hr = device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap_));
+    if (FAILED(hr)) { error = "Rstr2: failed to create descriptor heap."; return false; }
+    rlogf("Rstr2Core: create_resources heap ok\n");
 
     const UINT64 pixel_count = static_cast<UINT64>(width_) * static_cast<UINT64>(height_);
     const UINT64 bytes = pixel_count * 16u; // RGBA32F
@@ -463,11 +472,20 @@ bool Renderer::build_scene_accel(std::string& error) {
     wait_for_gpu();
     rlogf("Rstr2Core: accel built\n");
 
-    // TLAS / vertices / indices are bound as root-descriptor SRVs in
-    // render_frame (no shader-visible heap and no CreateShaderResourceView),
-    // which avoids the driver stack overflow seen when creating views into a
-    // shader-visible heap. Nothing else to do here.
-    rlogf("Rstr2Core: accel srv done (root SRVs)\n");
+    // Create the TLAS SRV in the shader-visible heap (register t0). Vertices,
+    // indices, camera and output are bound as root descriptors in render_frame.
+    // If this single CreateShaderResourceView still overflows the driver stack
+    // on the test GPU, we will see a crash here; with the 3 GB worker stack it
+    // should be fine.
+    rlogf("Rstr2Core: accel srv begin\n");
+    CD3DX12_CPU_DESCRIPTOR_HANDLE h0(heap_->GetCPUDescriptorHandleForHeapStart());
+    D3D12_SHADER_RESOURCE_VIEW_DESC tlas_srv = {};
+    tlas_srv.Format = DXGI_FORMAT_UNKNOWN;
+    tlas_srv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    tlas_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    tlas_srv.RaytracingAccelerationStructure.Location = tlas_->GetGPUVirtualAddress();
+    device_->CreateShaderResourceView(nullptr, &tlas_srv, h0);
+    rlogf("Rstr2Core: accel srv done\n");
 
     return update_camera_cbv(error);
 }
@@ -498,19 +516,27 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
 bool Renderer::create_root_signatures(std::string& error) {
     HRESULT hr;
 
-    // Global root signature (all root descriptors, no descriptor heap):
-    //   param 0: SRV t0 (TLAS)
-    //   param 1: SRV t1 (Vertices)
-    //   param 2: SRV t2 (Indices)
-    //   param 3: CBV b0 (camera)
-    //   param 4: UAV u0 (output)
-    // (Creating views in a shader-visible heap overflowed the driver stack on
-    // the test GPU, so every resource is bound as a root descriptor instead.)
+    // Global root signature:
+    //   param 0: descriptor table { SRV t0 (TLAS) } in the shader-visible heap
+    //   param 1: root SRV t1 (Vertices)
+    //   param 2: root SRV t2 (Indices)
+    //   param 3: root CBV b0 (camera)
+    //   param 4: root UAV u0 (output)
+    // (The TLAS must live in a shader-visible heap; the other resources are root
+    // descriptors to minimize heap view creation, which crashed the driver stack
+    // on the test GPU when done for many descriptors.)
+    D3D12_DESCRIPTOR_RANGE ranges[1] = {};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].NumDescriptors = 1;
+    ranges[0].BaseShaderRegister = 0;
+    ranges[0].RegisterSpace = 0;
+    ranges[0].OffsetInDescriptorsFromTableStart = 0;
+
     D3D12_ROOT_PARAMETER params[5] = {};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[0].Descriptor.RegisterSpace = 0;
+    params[0].DescriptorTable.NumDescriptorRanges = 1;
+    params[0].DescriptorTable.pDescriptorRanges = ranges;
 
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -682,8 +708,10 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
 
     cmd_list_->SetPipelineState1(state_object_.Get());
     cmd_list_->SetComputeRootSignature(global_rs_.Get());
-    // All resources bound as root descriptors (no shader-visible heap).
-    cmd_list_->SetComputeRootShaderResourceView(0, tlas_->GetGPUVirtualAddress());
+    // TLAS SRV (t0) via the shader-visible heap table; the rest are root descriptors.
+    ID3D12DescriptorHeap* heaps[] = { heap_.Get() };
+    cmd_list_->SetDescriptorHeaps(1, heaps);
+    cmd_list_->SetComputeRootDescriptorTable(0, heap_->GetGPUDescriptorHandleForHeapStart());
     cmd_list_->SetComputeRootShaderResourceView(1, vertex_buf_->GetGPUVirtualAddress());
     cmd_list_->SetComputeRootShaderResourceView(2, index_buf_->GetGPUVirtualAddress());
     cmd_list_->SetComputeRootConstantBufferView(3, cam_cbv_->GetGPUVirtualAddress());

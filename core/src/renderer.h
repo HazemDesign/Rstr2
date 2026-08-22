@@ -66,6 +66,11 @@ private:
     Microsoft::WRL::ComPtr<ID3D12CommandQueue>   queue_;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> cmd_list_;
+    // Shader-visible heap holding ONLY the TLAS SRV (register t0). Vertices,
+    // indices, camera and the output UAV are bound as root descriptors instead
+    // (creating views into a shader-visible heap overflowed the driver stack on
+    // the test GPU, so we keep the heap to a single descriptor).
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> heap_;
     Microsoft::WRL::ComPtr<ID3D12Resource>       output_;
     Microsoft::WRL::ComPtr<ID3D12Resource>       readback_;
     Microsoft::WRL::ComPtr<ID3D12Resource>       cam_cbv_;
@@ -84,6 +89,7 @@ private:
     HANDLE fence_event_ = nullptr;
 
     size_t sbt_raygen_offset_ = 0;
+    UINT descriptor_inc_ = 0;
     size_t sbt_miss_offset_ = 0;
     size_t sbt_hit_offset_ = 0;
     size_t sbt_miss_stride_ = 0;
