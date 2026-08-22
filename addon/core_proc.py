@@ -60,7 +60,7 @@ class CoreProcess:
 
         log_path = exe.parent / "Rstr2Core.log"
         try:
-            self._log = open(str(log_path), "ab", buffering=0)
+            self._log = open(str(log_path), "wb", buffering=0)
         except Exception:
             self._log = None
 

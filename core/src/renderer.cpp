@@ -159,13 +159,18 @@ bool Renderer::init_dxr(std::string& error) {
     // is already active, and is a harmless no-op otherwise.
     {
         Microsoft::WRL::ComPtr<ID3D12Debug> dbg;
-        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) {
-            Microsoft::WRL::ComPtr<ID3D12Debug1> dbg1;
-            if (SUCCEEDED(dbg.As(&dbg1))) {
-                dbg1->SetEnableGPUBasedValidation(FALSE);
-                dbg1->SetEnableSynchronizedCommandQueueValidation(FALSE);
+        HRESULT dh = D3D12GetDebugInterface(IID_PPV_ARGS(&dbg));
+        if (SUCCEEDED(dh)) {
+            Microsoft::WRL::ComPtr<ID3D12Debug3> dbg3;
+            if (SUCCEEDED(dbg.As(&dbg3))) {
+                dbg3->SetEnableGPUBasedValidation(FALSE);
+                dbg3->SetEnableSynchronizedCommandQueueValidation(FALSE);
                 rlogf("Rstr2Core: debug layer present, disabled GPU-Based Validation");
+            } else {
+                rlogf("Rstr2Core: debug layer present (ID3D12Debug only), could not disable GBV");
             }
+        } else {
+            rlogf("Rstr2Core: no D3D12 debug interface (0x%08X)", static_cast<unsigned>(dh));
         }
     }
 
