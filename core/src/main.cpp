@@ -1,10 +1,12 @@
-// Rstr2 native core - Phase 2 entry point.
+// Rstr2 native core - Phase 3 entry point.
 //
 // Modes:
 //   --ci                 CI smoke mode: print version and exit 0, no GPU.
-//   (default)            Init D3D12/DXR, ray-trace one hardcoded triangle,
-//                        publish RGBA32F pixels to Win32 shared memory, then
-//                        idle until Ctrl+C so the Blender addon can attach.
+//   (default)            Init D3D12/DXR, then loop: pull any scene the Blender
+//                        addon published over shared memory, ray-trace it with
+//                        the supplied camera, publish RGBA32F pixels to the
+//                        frame shared memory, and idle until Ctrl+C so the
+//                        addon can attach and read frames.
 
 #include <cstdio>
 #include <cstdlib>
@@ -29,11 +31,11 @@ BOOL WINAPI console_ctrl_handler(DWORD /*ctrl*/) {
 
 void print_help() {
     std::printf(
-        "Rstr2Core - Phase 2 DXR renderer\n"
+        "Rstr2Core - Phase 3 DXR renderer\n"
         "Usage: Rstr2Core [--width W] [--height H] [--shm NAME] [--ci]\n"
         "  --width  W   frame width  (default 960)\n"
         "  --height H   frame height (default 540)\n"
-        "  --shm   NAME shared-memory mapping name (default Local\\Rstr2Frame_v1)\n"
+        "  --shm   NAME shared-memory mapping name for published frames (default Local\\Rstr2Frame_v1)\n"
         "  --ci         print version and exit 0 (no GPU)\n");
 }
 
@@ -67,7 +69,7 @@ int main(int argc, char** argv) {
     }
 
     if (ci) {
-        std::printf("Rstr2Core 0.2.0 (Phase 2) - CI mode, no GPU init\n");
+        std::printf("Rstr2Core 0.3.0 (Phase 3) - CI mode, no GPU init\n");
         return 0;
     }
 
@@ -93,19 +95,35 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Scene bridge (addon -> core). Created lazily by the addon; we open it
+    // once it appears and poll it for updates each frame.
+    rstr2::SceneMem scene(L"Local\\Rstr2Scene_v1");
+
     std::vector<float> pixels(width * height * 4);
-    if (!renderer.render_frame(pixels.data(), err)) {
-        std::fprintf(stderr, "Rstr2Core: render failed: %s\n", err.c_str());
-        return 1;
-    }
 
-    shm.publish_frame(pixels.data(), width, height);
-    std::printf("Rstr2Core: frame published %dx%d\n", width, height);
-
-    // Idle until Ctrl+C so the Blender addon can attach and read frames.
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
+    std::printf("Rstr2Core: rendering %dx%d, waiting for scene/ctrl-c\n", width, height);
+
     while (g_running.load()) {
-        Sleep(1000);
+        if (!scene.is_open()) scene.open();
+        if (scene.is_open()) {
+            rstr2::SceneData sd;
+            if (scene.read_scene(sd)) {
+                std::string se;
+                if (!renderer.set_scene(sd, se)) {
+                    std::fprintf(stderr, "Rstr2Core: set_scene failed: %s\n", se.c_str());
+                }
+            }
+        }
+
+        std::string re;
+        if (!renderer.render_frame(pixels.data(), re)) {
+            std::fprintf(stderr, "Rstr2Core: render failed: %s\n", re.c_str());
+        } else {
+            shm.publish_frame(pixels.data(), width, height);
+        }
+
+        Sleep(33); // ~30 fps; cheap for a single-bounce triangle soup.
     }
 
     std::printf("Rstr2Core: shutting down\n");

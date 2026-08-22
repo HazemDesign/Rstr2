@@ -77,4 +77,81 @@ void SharedMem::publish_frame(const float* pixels, int width, int height) {
     std::atomic_ref<uint32_t>(hdr->frame_index).store(next, std::memory_order_release);
 }
 
+// ----------------------------------------------------------------------
+// SceneMem (reader side)
+// ----------------------------------------------------------------------
+SceneMem::SceneMem(const std::wstring& name) : name_(name) {}
+
+SceneMem::~SceneMem() { close(); }
+
+bool SceneMem::open() {
+    close();
+    HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, 0, name_.empty() ? nullptr : name_.c_str());
+    if (mapping == nullptr || mapping == INVALID_HANDLE_VALUE) return false;
+    void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    if (view == nullptr) {
+        CloseHandle(mapping);
+        return false;
+    }
+    mapping_ = mapping;
+    view_ = view;
+    return true;
+}
+
+void SceneMem::close() {
+    if (view_ != nullptr) { UnmapViewOfFile(view_); view_ = nullptr; }
+    if (mapping_ != nullptr) { CloseHandle(mapping_); mapping_ = nullptr; }
+}
+
+bool SceneMem::read_scene(SceneData& out) {
+    if (view_ == nullptr) return false;
+
+    const SceneHeader* hdr = reinterpret_cast<const SceneHeader*>(view_);
+
+    // Read the epoch/flags with acquire so the data writes are visible.
+    uint32_t epoch = std::atomic_ref<const uint32_t>(hdr->epoch).load(std::memory_order_acquire);
+    uint32_t ready = std::atomic_ref<const uint32_t>(hdr->ready).load(std::memory_order_acquire);
+    uint32_t writing = std::atomic_ref<const uint32_t>(hdr->writing).load(std::memory_order_acquire);
+    if (ready != 1 || writing != 0 || epoch == last_epoch_) return false;
+
+    if (!consistent_copy(out)) return false;
+
+    // Re-check epoch + writing after the copy to detect a torn update.
+    uint32_t epoch2 = std::atomic_ref<const uint32_t>(hdr->epoch).load(std::memory_order_acquire);
+    uint32_t writing2 = std::atomic_ref<const uint32_t>(hdr->writing).load(std::memory_order_acquire);
+    if (writing2 != 0 || epoch2 != epoch) return false;
+
+    last_epoch_ = epoch;
+    return true;
+}
+
+bool SceneMem::consistent_copy(SceneData& out) {
+    const SceneHeader* hdr = reinterpret_cast<const SceneHeader*>(view_);
+    if (hdr->magic != kSceneMagic || hdr->version != kSceneVersion) return false;
+
+    const uint32_t vcount = hdr->vertex_count;
+    const uint32_t icount = hdr->index_count;
+    if (vcount == 0 || icount == 0 || (icount % 3) != 0) return false;
+
+    const size_t vbytes = static_cast<size_t>(vcount) * 3u * sizeof(float);
+    const size_t ibytes = static_cast<size_t>(icount) * sizeof(uint32_t);
+    if (vbytes + ibytes > kMaxSceneBytes) return false;
+
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(view_);
+    const float* vptr = reinterpret_cast<const float*>(base + kSceneHeaderSize);
+    const uint32_t* iptr = reinterpret_cast<const uint32_t*>(base + kSceneHeaderSize + vbytes);
+
+    out.vertices.assign(vptr, vptr + static_cast<size_t>(vcount) * 3u);
+    out.indices.assign(iptr, iptr + icount);
+
+    for (int i = 0; i < 3; ++i) {
+        out.cam_origin[i] = hdr->cam_origin[i];
+        out.cam_right[i] = hdr->cam_right[i];
+        out.cam_up[i] = hdr->cam_up[i];
+        out.cam_forward[i] = hdr->cam_forward[i];
+    }
+    out.cam_tan_half_fov_y = hdr->cam_tan_half_fov_y;
+    return true;
+}
+
 } // namespace rstr2

@@ -11,10 +11,10 @@
 bl_info = {
     "name": "Rstr2",
     "author": "you",
-    "version": (0, 1, 0),
+    "version": (0, 3, 0),
     "blender": (4, 0, 0),
     "location": "Render Properties > Render Engine > Rstr2",
-    "description": "Custom RT renderer skeleton (Phase 1: test pattern)",
+    "description": "Custom RT renderer (Phase 3: DXR scene sync from Blender)",
     "category": "Render",
 }
 
@@ -59,6 +59,86 @@ def _resize_nearest(arr, width, height):
     return arr[np.ix_(ys, xs)]
 
 
+def _extract_scene(depsgraph, context):
+    """Build (vertices, indices, camera) for the native core.
+
+    vertices : (n, 3) float32, world-space triangle-soup vertices
+    indices  : (m,) uint32, 3 per triangle, indexing into `vertices`
+    camera   : dict with origin/right/up/forward (each length-3) and
+               tan_half_fov_y (float)
+
+    Returns None when the scene has no mesh geometry (so the core keeps its
+    last/ default scene instead of failing on an empty update).
+    """
+    import math
+
+    # --- Camera basis from the active camera (or a sensible default) -----
+    camera = context.scene.camera
+    if camera is None:
+        cam = {
+            "origin": (0.0, 0.6, -2.2),
+            "right": (1.0, 0.0, 0.0),
+            "up": (0.0, 1.0, 0.0),
+            "forward": (0.0, 0.0, 1.0),
+            "tan_half_fov_y": math.tan(0.45),
+        }
+    else:
+        cam_eval = camera.evaluated_get(depsgraph)
+        mw = cam_eval.matrix_world
+        origin = (float(mw[0][3]), float(mw[1][3]), float(mw[2][3]))
+        right = (float(mw[0][0]), float(mw[1][0]), float(mw[2][0]))
+        up = (float(mw[0][1]), float(mw[1][1]), float(mw[2][1]))
+        back = (float(mw[0][2]), float(mw[1][2]), float(mw[2][2]))
+        forward = (-back[0], -back[1], -back[2])
+        cd = camera.data
+        fov_y = getattr(cd, "angle_y", None)
+        if fov_y is None:
+            fov_y = cd.angle
+        cam = {
+            "origin": origin,
+            "right": right,
+            "up": up,
+            "forward": forward,
+            "tan_half_fov_y": math.tan(float(fov_y) / 2.0),
+        }
+
+    # --- World-space triangle soup from all MESH objects -----------------
+    vert_chunks = []
+    idx_chunks = []
+    offset = 0
+    for obj in depsgraph.objects:
+        if obj.type != "MESH":
+            continue
+        mesh = obj.evaluated_get(depsgraph).data
+        n = len(mesh.vertices)
+        if n == 0:
+            continue
+
+        local = np.empty((n, 3), dtype=np.float32)
+        mesh.vertices.foreach_get("co", local.ravel())
+
+        m = np.array(obj.matrix_world, dtype=np.float32)
+        ones = np.ones((n, 1), dtype=np.float32)
+        vh = np.concatenate([local, ones], axis=1)  # (n, 4)
+        world = (m @ vh.T).T[:, :3].astype(np.float32)
+        vert_chunks.append(world)
+
+        loops = mesh.loops
+        li = []
+        for tri in mesh.loop_triangles:
+            for lp in tri.loops:
+                li.append(offset + int(loops[lp].vertex_index))
+        idx_chunks.append(np.asarray(li, dtype=np.uint32))
+        offset += n
+
+    if not vert_chunks:
+        return None
+
+    vertices = np.concatenate(vert_chunks, axis=0)
+    indices = np.concatenate(idx_chunks, axis=0) if idx_chunks else np.empty((0,), dtype=np.uint32)
+    return vertices, indices, cam
+
+
 class Rstr2Engine(RenderEngine):
     bl_idname = "RSTR2"
     bl_label = "Rstr2"
@@ -67,11 +147,12 @@ class Rstr2Engine(RenderEngine):
     def __init__(self):
         self.frame = 0
 
-        # --- Phase 2: native core bridge state -------------------------
+        # --- Phase 2/3: native core bridge state -----------------------
         self._core_started = False
         self._core_ok = False
         self._core = None          # CoreProcess instance
         self._reader = None        # CoreFrameReader instance
+        self._scene_writer = None  # SceneWriter instance (addon -> core)
         self._last_frame_index = None
         self._cached_pixels = None
 
@@ -87,6 +168,7 @@ class Rstr2Engine(RenderEngine):
         # Try a ready core frame; fall back to the test pattern unchanged.
         pixels = None
         try:
+            self._sync_scene(depsgraph, context)
             if self._ensure_core():
                 frame = self._reader.read_frame()
                 if frame is not None:
@@ -111,7 +193,12 @@ class Rstr2Engine(RenderEngine):
     # Viewport sync
     # ------------------------------------------------------------------
     def view_update(self, context, depsgraph):
-        # Phase 1: nothing to sync yet; just keep redrawing the animated pattern.
+        # Phase 3: push the current scene (meshes + camera) to the native core.
+        try:
+            self._sync_scene(depsgraph, context)
+        except Exception:
+            pass
+        # Keep redrawing so the live core feed updates.
         self.tag_redraw()
 
     # ------------------------------------------------------------------
@@ -175,6 +262,33 @@ class Rstr2Engine(RenderEngine):
 
 
     # ------------------------------------------------------------------
+    # Phase 3 scene bridge helpers
+    # ------------------------------------------------------------------
+    def _ensure_scene_writer(self):
+        """Lazily create the addon->core scene mapping writer."""
+        if self._scene_writer is None:
+            try:
+                from . import scene_shm
+
+                self._scene_writer = scene_shm.SceneWriter()
+            except Exception:
+                self._scene_writer = None
+        return self._scene_writer is not None
+
+    def _sync_scene(self, depsgraph, context):
+        """Extract meshes + camera from the depsgraph and publish to the core."""
+        scene = _extract_scene(depsgraph, context)
+        if scene is None:
+            return
+        if not self._ensure_scene_writer():
+            return
+        try:
+            vertices, indices, camera = scene
+            self._scene_writer.write(vertices, indices, camera)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
     # Phase 2 core bridge helpers
     # ------------------------------------------------------------------
     def _ensure_core(self):
@@ -216,11 +330,17 @@ class Rstr2Engine(RenderEngine):
         return self._reader is not None
 
     def _shutdown_core(self):
-        """Terminate the core process and close the mapping (best effort)."""
+        """Terminate the core process and close the mappings (best effort)."""
         try:
             if self._reader is not None:
                 self._reader.close()
                 self._reader = None
+        except Exception:
+            pass
+        try:
+            if self._scene_writer is not None:
+                self._scene_writer.close()
+                self._scene_writer = None
         except Exception:
             pass
         try:

@@ -1,4 +1,4 @@
-// Rstr2 Phase 2 - D3D12 / DXR renderer implementation. See renderer.h.
+// Rstr2 Phase 3 - D3D12 / DXR renderer implementation. See renderer.h.
 
 #include "renderer.h"
 
@@ -6,6 +6,7 @@
 #include <dxgi1_6.h>
 #include <cstring>
 #include <cstdio>
+#include <cmath>
 #include <fstream>
 #include <vector>
 #include <string>
@@ -13,9 +14,6 @@
 namespace rstr2 {
 
 namespace {
-
-// Vertex layout for the hardcoded triangle.
-struct TriVertex { float x, y, z; };
 
 // Minimal stand-ins for the d3dx12.h helpers we are not allowed to use.
 struct CD3DX12_CPU_DESCRIPTOR_HANDLE : public D3D12_CPU_DESCRIPTOR_HANDLE {
@@ -35,9 +33,38 @@ const D3D12_HEAP_PROPERTIES kUploadHeap = []() {
     return h;
 }();
 
+// Camera constant buffer layout must match cbuffer Camera in raytracing.hlsl:
+// each float3 is padded to 16 bytes, the trailing float packs after forward.
+struct CameraCB {
+    float origin[4];
+    float right[4];
+    float up[4];
+    float forward[4];
+    float tanHalfFovY;
+    float pad[3];
+};
+static_assert(sizeof(CameraCB) == 64, "CameraCB must be 64 bytes");
+
 HRESULT serialize_root_signature(const D3D12_ROOT_SIGNATURE_DESC& desc,
                                  ID3DBlob** blob, ID3DBlob** error) {
     return D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, blob, error);
+}
+
+// Default Phase 2 fallback scene: a single triangle + the matching camera.
+SceneData make_default_scene() {
+    SceneData s;
+    s.vertices = {
+        -0.7f, -0.5f, 0.0f,
+         0.7f, -0.5f, 0.0f,
+         0.0f,  0.7f, 0.0f,
+    };
+    s.indices = {0, 1, 2};
+    s.cam_origin[0] = 0.0f; s.cam_origin[1] = 0.6f; s.cam_origin[2] = -2.2f;
+    s.cam_right[0] = 1.0f; s.cam_right[1] = 0.0f; s.cam_right[2] = 0.0f;
+    s.cam_up[0] = 0.0f; s.cam_up[1] = 1.0f; s.cam_up[2] = 0.0f;
+    s.cam_forward[0] = 0.0f; s.cam_forward[1] = 0.0f; s.cam_forward[2] = 1.0f;
+    s.cam_tan_half_fov_y = std::tan(0.45f);
+    return s;
 }
 
 } // namespace
@@ -45,10 +72,7 @@ HRESULT serialize_root_signature(const D3D12_ROOT_SIGNATURE_DESC& desc,
 Renderer::Renderer() = default;
 
 Renderer::~Renderer() {
-    // Ensure GPU is idle before releasing resources.
-    if (device_ && queue_ && fence_) {
-        wait_for_gpu();
-    }
+    if (device_ && queue_ && fence_) wait_for_gpu();
     if (fence_event_ != nullptr) CloseHandle(fence_event_);
 }
 
@@ -57,12 +81,17 @@ bool Renderer::init(int width, int height, std::string& error) {
     height_ = height;
 
     if (!load_shader_bytecode(error)) return false;
-
-    (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED); // not fatal if already init
+    (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     if (!init_dxr(error)) return false;
     if (!create_resources(error)) return false;
-    if (!build_acceleration_structures(error)) return false;
+
+    // Default fallback scene (hardcoded triangle) so we always have something
+    // to render before/without the addon scene bridge.
+    scene_ = make_default_scene();
+    have_scene_ = true;
+
+    if (!build_scene_accel(error)) return false;
     if (!create_root_signatures(error)) return false;
     if (!create_pipeline(error)) return false;
     if (!create_sbt(error)) return false;
@@ -71,7 +100,6 @@ bool Renderer::init(int width, int height, std::string& error) {
 }
 
 bool Renderer::load_shader_bytecode(std::string& error) {
-    // Locate <exedir>/raytracing.cso (placed next to the exe by the build).
     wchar_t mod[1024] = {};
     DWORD n = GetModuleFileNameW(nullptr, mod, static_cast<DWORD>(_countof(mod)));
     if (n == 0 || n >= _countof(mod)) {
@@ -91,17 +119,11 @@ bool Renderer::load_shader_bytecode(std::string& error) {
     }
     f.seekg(0, std::ios::end);
     std::streamoff sz = f.tellg();
-    if (sz <= 0) {
-        error = "Rstr2: raytracing.cso is empty.";
-        return false;
-    }
+    if (sz <= 0) { error = "Rstr2: raytracing.cso is empty."; return false; }
     f.seekg(0, std::ios::beg);
     shader_bytecode_.resize(static_cast<size_t>(sz));
     f.read(reinterpret_cast<char*>(shader_bytecode_.data()), sz);
-    if (!f) {
-        error = "Rstr2: failed to read raytracing.cso.";
-        return false;
-    }
+    if (!f) { error = "Rstr2: failed to read raytracing.cso."; return false; }
     return true;
 }
 
@@ -128,7 +150,6 @@ bool Renderer::init_dxr(std::string& error) {
         return false;
     }
 
-    // Raytracing support?
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 opts5 = {};
     hr = device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &opts5, sizeof(opts5));
     if (FAILED(hr) || opts5.RaytracingTier < D3D12_RAYTRACING_TIER_1_0) {
@@ -136,7 +157,6 @@ bool Renderer::init_dxr(std::string& error) {
         return false;
     }
 
-    // GRAPHICS (DIRECT) command queue.
     D3D12_COMMAND_QUEUE_DESC qd = {};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     qd.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
@@ -149,7 +169,7 @@ bool Renderer::init_dxr(std::string& error) {
     hr = device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator_.Get(),
                                     nullptr, IID_PPV_ARGS(&cmd_list_));
     if (FAILED(hr)) { error = "Rstr2: failed to create command list."; return false; }
-    cmd_list_->Close(); // created in recording state; reset before use.
+    cmd_list_->Close();
 
     descriptor_inc_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
@@ -164,10 +184,11 @@ bool Renderer::init_dxr(std::string& error) {
 bool Renderer::create_resources(std::string& error) {
     HRESULT hr;
 
-    // Shader-visible CBV_SRV_UAV heap: [0]=TLAS SRV, [1]=output UAV.
+    // Shader-visible CBV_SRV_UAV heap: [0]=TLAS SRV, [1]=Vertices SRV,
+    // [2]=Indices SRV, [3]=output UAV. (SRVs 0..2 are filled by build_scene_accel.)
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 2;
+    hd.NumDescriptors = 4;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     hr = device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap_));
     if (FAILED(hr)) { error = "Rstr2: failed to create descriptor heap."; return false; }
@@ -175,7 +196,6 @@ bool Renderer::create_resources(std::string& error) {
     const UINT64 pixel_count = static_cast<UINT64>(width_) * static_cast<UINT64>(height_);
     const UINT64 bytes = pixel_count * 16u; // RGBA32F
 
-    // Output RW buffer (DEFAULT, UNORDERED_ACCESS).
     D3D12_RESOURCE_DESC ob = {};
     ob.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     ob.Width = bytes;
@@ -188,7 +208,6 @@ bool Renderer::create_resources(std::string& error) {
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&output_));
     if (FAILED(hr)) { error = "Rstr2: failed to create output buffer."; return false; }
 
-    // Readback buffer (COPY_DEST initially).
     D3D12_RESOURCE_DESC rb = ob;
     rb.Flags = D3D12_RESOURCE_FLAG_NONE;
     hr = device_->CreateCommittedResource(
@@ -196,46 +215,91 @@ bool Renderer::create_resources(std::string& error) {
         D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback_));
     if (FAILED(hr)) { error = "Rstr2: failed to create readback buffer."; return false; }
 
-    // Vertex buffer (UPLOAD) with the 3 hardcoded triangle vertices.
-    TriVertex verts[3] = {
-        {-0.7f, -0.5f, 0.0f},
-        { 0.7f, -0.5f, 0.0f},
-        { 0.0f,  0.7f, 0.0f},
-    };
-    const UINT64 vsize = sizeof(verts);
-    D3D12_RESOURCE_DESC vb = {};
-    vb.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    vb.Width = vsize;
-    vb.Height = 1; vb.DepthOrArraySize = 1; vb.MipLevels = 1;
-    vb.SampleDesc.Count = 1;
-    vb.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    vb.Flags = D3D12_RESOURCE_FLAG_NONE;
+    // Output UAV at heap index 3.
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+    uav.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    uav.Buffer.FirstElement = 0;
+    uav.Buffer.NumElements = static_cast<UINT>(width_ * height_);
+    uav.Buffer.StructureByteStride = 0;
+    CD3DX12_CPU_DESCRIPTOR_HANDLE h3(heap_->GetCPUDescriptorHandleForHeapStart());
+    h3.Offset(3, descriptor_inc_);
+    device_->CreateUnorderedAccessView(output_.Get(), nullptr, &uav, h3);
+
+    // Camera constant buffer (UPLOAD, 64 bytes).
+    D3D12_RESOURCE_DESC cb = {};
+    cb.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    cb.Width = sizeof(CameraCB);
+    cb.Height = 1; cb.DepthOrArraySize = 1; cb.MipLevels = 1;
+    cb.SampleDesc.Count = 1;
+    cb.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    cb.Flags = D3D12_RESOURCE_FLAG_NONE;
     hr = device_->CreateCommittedResource(
-        &kUploadHeap, D3D12_HEAP_FLAG_NONE, &vb,
+        &kUploadHeap, D3D12_HEAP_FLAG_NONE, &cb,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&cam_cbv_));
+    if (FAILED(hr)) { error = "Rstr2: failed to create camera constant buffer."; return false; }
+
+    return true;
+}
+
+bool Renderer::build_scene_accel(std::string& error) {
+    HRESULT hr;
+    const UINT64 vcount = scene_.vertices.size() / 3;
+    const UINT64 icount = scene_.indices.size();
+    if (vcount == 0 || icount == 0 || (icount % 3) != 0) {
+        error = "Rstr2: scene has no triangles.";
+        return false;
+    }
+    const UINT stride = 12; // float3
+
+    // ---- Vertex buffer (UPLOAD, world space) ----
+    D3D12_RESOURCE_DESC vbd = {};
+    vbd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    vbd.Width = vcount * stride;
+    vbd.Height = 1; vbd.DepthOrArraySize = 1; vbd.MipLevels = 1;
+    vbd.SampleDesc.Count = 1;
+    vbd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    vbd.Flags = D3D12_RESOURCE_FLAG_NONE;
+    hr = device_->CreateCommittedResource(
+        &kUploadHeap, D3D12_HEAP_FLAG_NONE, &vbd,
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&vertex_buf_));
     if (FAILED(hr)) { error = "Rstr2: failed to create vertex buffer."; return false; }
     {
         void* mapped = nullptr;
         vertex_buf_->Map(0, nullptr, &mapped);
-        std::memcpy(mapped, verts, sizeof(verts));
+        std::memcpy(mapped, scene_.vertices.data(), static_cast<size_t>(vcount) * stride);
         vertex_buf_->Unmap(0, nullptr);
     }
 
-    return true;
-}
-
-bool Renderer::build_acceleration_structures(std::string& error) {
-    HRESULT hr;
-    const UINT64 vstride = sizeof(TriVertex);
+    // ---- Index buffer (UPLOAD, uint32) ----
+    D3D12_RESOURCE_DESC ibd = {};
+    ibd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    ibd.Width = icount * sizeof(uint32_t);
+    ibd.Height = 1; ibd.DepthOrArraySize = 1; ibd.MipLevels = 1;
+    ibd.SampleDesc.Count = 1;
+    ibd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ibd.Flags = D3D12_RESOURCE_FLAG_NONE;
+    hr = device_->CreateCommittedResource(
+        &kUploadHeap, D3D12_HEAP_FLAG_NONE, &ibd,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&index_buf_));
+    if (FAILED(hr)) { error = "Rstr2: failed to create index buffer."; return false; }
+    {
+        void* mapped = nullptr;
+        index_buf_->Map(0, nullptr, &mapped);
+        std::memcpy(mapped, scene_.indices.data(), static_cast<size_t>(icount) * sizeof(uint32_t));
+        index_buf_->Unmap(0, nullptr);
+    }
 
     // ---- BLAS ----
     D3D12_RAYTRACING_GEOMETRY_DESC geom = {};
     geom.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
     geom.Triangles.VertexBuffer.StartAddress = vertex_buf_->GetGPUVirtualAddress();
-    geom.Triangles.VertexBuffer.StrideInBytes = static_cast<UINT>(vstride);
-    geom.Triangles.VertexCount = 3;
+    geom.Triangles.VertexBuffer.StrideInBytes = static_cast<UINT>(stride);
+    geom.Triangles.VertexCount = static_cast<UINT>(vcount);
     geom.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-    geom.Triangles.IndexFormat = DXGI_FORMAT_UNKNOWN;
+    geom.Triangles.IndexBuffer = index_buf_->GetGPUVirtualAddress();
+    geom.Triangles.IndexCount = static_cast<UINT>(icount);
+    geom.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
     geom.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blas_inputs = {};
@@ -268,10 +332,10 @@ bool Renderer::build_acceleration_structures(std::string& error) {
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&blas_scratch_));
     if (FAILED(hr)) { error = "Rstr2: failed to create BLAS scratch."; return false; }
 
-    // ---- Instance buffer (UPLOAD) ----
+    // ---- Instance buffer (identity transform, single instance) ----
     D3D12_RAYTRACING_INSTANCE_DESC inst = {};
     inst.Transform[0][0] = 1.0f; inst.Transform[1][1] = 1.0f; inst.Transform[2][2] = 1.0f;
-    inst.InstanceMask = 1;
+    inst.InstanceMask = 0xFF;
     inst.InstanceContributionToHitGroupIndex = 0;
     inst.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
     inst.AccelerationStructure = blas_->GetGPUVirtualAddress();
@@ -350,36 +414,73 @@ bool Renderer::build_acceleration_structures(std::string& error) {
     queue_->ExecuteCommandLists(1, lists);
     wait_for_gpu();
 
-    // ---- TLAS SRV (heap index 0) ----
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
-    srv.Format = DXGI_FORMAT_UNKNOWN;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.RaytracingAccelerationStructure.Location = tlas_->GetGPUVirtualAddress();
+    // ---- TLAS SRV (heap[0]), Vertices SRV (heap[1]), Indices SRV (heap[2]) ----
     CD3DX12_CPU_DESCRIPTOR_HANDLE h0(heap_->GetCPUDescriptorHandleForHeapStart());
-    device_->CreateShaderResourceView(nullptr, &srv, h0);
 
-    // ---- Output UAV (heap index 1) ----
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
-    uav.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    uav.Buffer.FirstElement = 0;
-    uav.Buffer.NumElements = static_cast<UINT>(width_ * height_);
-    uav.Buffer.StructureByteStride = 0;
+    D3D12_SHADER_RESOURCE_VIEW_DESC tlas_srv = {};
+    tlas_srv.Format = DXGI_FORMAT_UNKNOWN;
+    tlas_srv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    tlas_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    tlas_srv.RaytracingAccelerationStructure.Location = tlas_->GetGPUVirtualAddress();
+    device_->CreateShaderResourceView(nullptr, &tlas_srv, h0);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC vsrv = {};
+    vsrv.Format = DXGI_FORMAT_UNKNOWN;
+    vsrv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    vsrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    vsrv.Buffer.FirstElement = 0;
+    vsrv.Buffer.NumElements = static_cast<UINT>(vcount);
+    vsrv.Buffer.StructureByteStride = stride;
     CD3DX12_CPU_DESCRIPTOR_HANDLE h1(h0);
     h1.Offset(1, descriptor_inc_);
-    device_->CreateUnorderedAccessView(output_.Get(), nullptr, &uav, h1);
+    device_->CreateShaderResourceView(vertex_buf_.Get(), &vsrv, h1);
 
+    D3D12_SHADER_RESOURCE_VIEW_DESC isrv = {};
+    isrv.Format = DXGI_FORMAT_UNKNOWN;
+    isrv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    isrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    isrv.Buffer.FirstElement = 0;
+    isrv.Buffer.NumElements = static_cast<UINT>(icount);
+    isrv.Buffer.StructureByteStride = sizeof(uint32_t);
+    CD3DX12_CPU_DESCRIPTOR_HANDLE h2(h1);
+    h2.Offset(1, descriptor_inc_);
+    device_->CreateShaderResourceView(index_buf_.Get(), &isrv, h2);
+
+    return update_camera_cbv(error);
+}
+
+bool Renderer::update_camera_cbv(std::string& error) {
+    if (!cam_cbv_) { error = "Rstr2: camera constant buffer missing."; return false; }
+    CameraCB cb;
+    std::memset(&cb, 0, sizeof(cb));
+    std::memcpy(cb.origin, scene_.cam_origin, 3 * sizeof(float));
+    std::memcpy(cb.right, scene_.cam_right, 3 * sizeof(float));
+    std::memcpy(cb.up, scene_.cam_up, 3 * sizeof(float));
+    std::memcpy(cb.forward, scene_.cam_forward, 3 * sizeof(float));
+    cb.tanHalfFovY = scene_.cam_tan_half_fov_y;
+    void* mapped = nullptr;
+    cam_cbv_->Map(0, nullptr, &mapped);
+    std::memcpy(mapped, &cb, sizeof(cb));
+    cam_cbv_->Unmap(0, nullptr);
     return true;
+}
+
+bool Renderer::set_scene(const SceneData& scene, std::string& error) {
+    scene_ = scene;
+    have_scene_ = true;
+    // Rebuild geometry + acceleration structures from the new scene.
+    return build_scene_accel(error);
 }
 
 bool Renderer::create_root_signatures(std::string& error) {
     HRESULT hr;
 
-    // Global root signature: descriptor table { SRV t0, UAV u0 }.
+    // Global root signature:
+    //   param 0: descriptor table { SRV t0,t1,t2 (TLAS, Vertices, Indices), UAV u0 }
+    //   param 1: CBV b0 (camera)
     D3D12_DESCRIPTOR_RANGE ranges[2] = {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 1;
+    ranges[0].NumDescriptors = 3;
     ranges[0].BaseShaderRegister = 0;
     ranges[0].RegisterSpace = 0;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
@@ -387,55 +488,38 @@ bool Renderer::create_root_signatures(std::string& error) {
     ranges[1].NumDescriptors = 1;
     ranges[1].BaseShaderRegister = 0;
     ranges[1].RegisterSpace = 0;
-    ranges[1].OffsetInDescriptorsFromTableStart = 1;
+    ranges[1].OffsetInDescriptorsFromTableStart = 3;
 
-    D3D12_ROOT_PARAMETER gparam = {};
-    gparam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    gparam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    gparam.DescriptorTable.NumDescriptorRanges = 2;
-    gparam.DescriptorTable.pDescriptorRanges = ranges;
+    D3D12_ROOT_PARAMETER params[2] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[0].DescriptorTable.NumDescriptorRanges = 2;
+    params[0].DescriptorTable.pDescriptorRanges = ranges;
 
-    D3D12_ROOT_SIGNATURE_DESC grs = {};
-    grs.NumParameters = 1;
-    grs.pParameters = &gparam;
-    grs.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[1].Descriptor.ShaderRegister = 0;
+    params[1].Descriptor.RegisterSpace = 0;
+
+    D3D12_ROOT_SIGNATURE_DESC rs = {};
+    rs.NumParameters = 2;
+    rs.pParameters = params;
+    rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
 
     Microsoft::WRL::ComPtr<ID3DBlob> blob, err;
-    hr = serialize_root_signature(grs, &blob, &err);
+    hr = serialize_root_signature(rs, &blob, &err);
     if (FAILED(hr)) { error = "Rstr2: failed to serialize global root signature."; return false; }
     hr = device_->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
                                       IID_PPV_ARGS(&global_rs_));
     if (FAILED(hr)) { error = "Rstr2: failed to create global root signature."; return false; }
-
-    // Local root signature (hit): root SRV t0, space1 (vertex buffer).
-    D3D12_ROOT_PARAMETER lparam = {};
-    lparam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    lparam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    lparam.Descriptor.ShaderRegister = 0;
-    lparam.Descriptor.RegisterSpace = 1;
-    // NOTE: D3D12_ROOT_DESCRIPTOR.Flags does not exist in all Windows SDK
-    // versions (it was added later, alongside D3D12_ROOT_DESCRIPTOR_FLAGS).
-    // It defaults to 0, so we omit it for broad SDK compatibility.
-
-    D3D12_ROOT_SIGNATURE_DESC lrs = {};
-    lrs.NumParameters = 1;
-    lrs.pParameters = &lparam;
-    lrs.Flags = D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE;
-
-    hr = serialize_root_signature(lrs, &blob, &err);
-    if (FAILED(hr)) { error = "Rstr2: failed to serialize local root signature."; return false; }
-    hr = device_->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                      IID_PPV_ARGS(&local_rs_));
-    if (FAILED(hr)) { error = "Rstr2: failed to create local root signature."; return false; }
 
     return true;
 }
 
 bool Renderer::create_pipeline(std::string& error) {
     std::vector<D3D12_STATE_SUBOBJECT> subs;
-    subs.reserve(8); // reserve so captured pointers stay valid
+    subs.reserve(7);
 
-    // 1. State object config.
     D3D12_STATE_OBJECT_CONFIG config = {};
     config.Flags = D3D12_STATE_OBJECT_FLAG_NONE;
     {
@@ -445,7 +529,6 @@ bool Renderer::create_pipeline(std::string& error) {
         subs.push_back(s);
     }
 
-    // 2. DXIL library with three exports.
     D3D12_EXPORT_DESC exp[3] = {};
     exp[0].Name = L"raygenMain";
     exp[1].Name = L"missMain";
@@ -462,7 +545,6 @@ bool Renderer::create_pipeline(std::string& error) {
         subs.push_back(s);
     }
 
-    // 3. Shader config (payload 16, attr 8).
     D3D12_RAYTRACING_SHADER_CONFIG shader_config = {};
     shader_config.MaxPayloadSizeInBytes = 16;
     shader_config.MaxAttributeSizeInBytes = 8;
@@ -473,7 +555,6 @@ bool Renderer::create_pipeline(std::string& error) {
         subs.push_back(s);
     }
 
-    // 4. Global root signature.
     D3D12_GLOBAL_ROOT_SIGNATURE global_rs = {};
     global_rs.pGlobalRootSignature = global_rs_.Get();
     {
@@ -483,16 +564,6 @@ bool Renderer::create_pipeline(std::string& error) {
         subs.push_back(s);
     }
 
-    // 5. Local root signature (kept referenced for the association below).
-    D3D12_LOCAL_ROOT_SIGNATURE local_rs = {};
-    local_rs.pLocalRootSignature = local_rs_.Get();
-    D3D12_STATE_SUBOBJECT local_rs_sub = {};
-    local_rs_sub.Type = D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE;
-    local_rs_sub.pDesc = &local_rs;
-    subs.push_back(local_rs_sub);
-    D3D12_STATE_SUBOBJECT* local_rs_ptr = &subs.back();
-
-    // 6. Hit group.
     D3D12_HIT_GROUP_DESC hg = {};
     hg.Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
     hg.HitGroupExport = L"HitGroup";
@@ -504,20 +575,6 @@ bool Renderer::create_pipeline(std::string& error) {
         subs.push_back(s);
     }
 
-    // 7. Associate local root signature with the hit group.
-    LPCWSTR assoc_exports[] = { L"HitGroup" };
-    D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION assoc = {};
-    assoc.pSubobjectToAssociate = local_rs_ptr;
-    assoc.NumExports = 1;
-    assoc.pExports = assoc_exports;
-    {
-        D3D12_STATE_SUBOBJECT s = {};
-        s.Type = D3D12_STATE_SUBOBJECT_TYPE_SUBOBJECT_TO_EXPORTS_ASSOCIATION;
-        s.pDesc = &assoc;
-        subs.push_back(s);
-    }
-
-    // 8. Pipeline config (max recursion depth 1).
     D3D12_RAYTRACING_PIPELINE_CONFIG pipeline = {};
     pipeline.MaxTraceRecursionDepth = 1;
     {
@@ -539,22 +596,19 @@ bool Renderer::create_pipeline(std::string& error) {
         return false;
     }
     hr = state_object_->QueryInterface(IID_PPV_ARGS(&state_props_));
-    if (FAILED(hr)) {
-        error = "Rstr2: failed to query ID3D12StateObjectProperties.";
-        return false;
-    }
+    if (FAILED(hr)) { error = "Rstr2: failed to query ID3D12StateObjectProperties."; return false; }
     return true;
 }
 
 bool Renderer::create_sbt(std::string& error) {
-    const UINT idSize = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;   // 32
-    const UINT align = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT; // 64
+    const UINT idSize = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+    const UINT align = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;
     sbt_raygen_offset_ = 0;
-    sbt_miss_offset_ = align;        // 64
-    sbt_hit_offset_ = align * 2;     // 128
-    sbt_miss_stride_ = idSize;       // 32
-    sbt_hit_stride_ = 64;            // id(32) + localArg(8) -> aligned to 32
-    const UINT64 sbt_size = sbt_hit_offset_ + sbt_hit_stride_; // 192
+    sbt_miss_offset_ = align;
+    sbt_hit_offset_ = align * 2;
+    sbt_miss_stride_ = idSize;
+    sbt_hit_stride_ = idSize;
+    const UINT64 sbt_size = sbt_hit_offset_ + sbt_hit_stride_;
 
     D3D12_RESOURCE_DESC sd = {};
     sd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -580,10 +634,6 @@ bool Renderer::create_sbt(std::string& error) {
     copy_id(mapped + sbt_miss_offset_, L"missMain");
     copy_id(mapped + sbt_hit_offset_, L"hitMain");
 
-    // Local root argument for the hit group: GPU VA of the vertex buffer (8 bytes).
-    const UINT64 vtx_va = vertex_buf_->GetGPUVirtualAddress();
-    std::memcpy(mapped + sbt_hit_offset_ + idSize, &vtx_va, sizeof(vtx_va));
-
     sbt_->Unmap(0, nullptr);
     return true;
 }
@@ -597,6 +647,7 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     cmd_list_->SetPipelineState1(state_object_.Get());
     cmd_list_->SetComputeRootSignature(global_rs_.Get());
     cmd_list_->SetComputeRootDescriptorTable(0, heap_->GetGPUDescriptorHandleForHeapStart());
+    cmd_list_->SetComputeRootConstantBufferView(1, cam_cbv_->GetGPUVirtualAddress());
 
     D3D12_DISPATCH_RAYS_DESC dr = {};
     dr.RayGenerationShaderRecord.StartAddress = sbt_->GetGPUVirtualAddress() + sbt_raygen_offset_;
@@ -610,7 +661,6 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     dr.Depth = 1;
     cmd_list_->DispatchRays(&dr);
 
-    // Output buffer: UNORDERED_ACCESS -> COPY_SOURCE.
     D3D12_RESOURCE_BARRIER b = {};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     b.Transition.pResource = output_.Get();

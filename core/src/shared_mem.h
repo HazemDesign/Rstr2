@@ -1,5 +1,6 @@
-// Rstr2 Phase 2 - shared memory frame bridge (writer side).
+// Rstr2 - shared memory bridges (writer: frame; reader: scene).
 //
+// --- Frame bridge (Phase 2, writer side, core -> addon) -----------------
 // Layout (little-endian), total header = 256 bytes:
 //   offset 0  : u32 magic        = 0x32525352 ('Rstr' little-endian-ish)
 //   offset 4  : u32 version      = 1
@@ -14,14 +15,73 @@
 //
 // Publish order (writer): memcpy pixels -> release fence -> state=1 ->
 // frame_index++ LAST. The reader detects a new frame by watching frame_index.
+//
+// --- Scene bridge (Phase 3, reader side, addon -> core) ------------------
+// A separate mapping "Local\\Rstr2Scene_v1" carries the Blender scene the
+// core should ray-trace: world-space triangle soup + camera basis. The core
+// polls it; the addon (Python) writes it. Header (256 bytes) at offset 0:
+//   u32 magic        = 0x32525353 ('RRS3')
+//   u32 version      = 1
+//   u32 epoch        (incremented LAST by the writer on each update)
+//   u32 ready        (1 = valid)
+//   u32 writing      (1 while the writer is mid-update)
+//   u32 vertex_count (xyz triples)
+//   u32 index_count  (uint32 indices)
+//   u32 pad
+//   float cam_origin[3], cam_right[3], cam_up[3], cam_forward[3]
+//   float cam_tan_half_fov_y
+//   (padded to 256)
+//   offset 256: vertices  (vertex_count * 3 * float32, world space)
+//   then      : indices   (index_count * uint32)
 
 #pragma once
 
 #include <cstdint>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 namespace rstr2 {
+
+// ----------------------------------------------------------------------
+// Scene bridge types
+// ----------------------------------------------------------------------
+static constexpr uint32_t kSceneMagic = 0x32525353u;
+static constexpr uint32_t kSceneVersion = 1;
+static constexpr size_t kSceneHeaderSize = 256;
+static constexpr size_t kMaxSceneBytes = 64 * 1024 * 1024; // 64 MB safety cap
+
+struct SceneData {
+    std::vector<float> vertices;       // xyz, world space
+    std::vector<uint32_t> indices;     // uint32 triangle indices
+    float cam_origin[3] = {0, 0, 0};
+    float cam_right[3] = {1, 0, 0};
+    float cam_up[3] = {0, 1, 0};
+    float cam_forward[3] = {0, 0, 1};
+    float cam_tan_half_fov_y = 0.5f;
+};
+
+#pragma pack(push, 4)
+struct SceneHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t epoch;
+    uint32_t ready;
+    uint32_t writing;
+    uint32_t vertex_count;
+    uint32_t index_count;
+    uint32_t pad;
+    float cam_origin[3];
+    float cam_right[3];
+    float cam_up[3];
+    float cam_forward[3];
+    float cam_tan_half_fov_y;
+    uint8_t reserved[kSceneHeaderSize - (8 * 4 + 13 * 4)];
+};
+#pragma pack(pop)
+
+static_assert(sizeof(SceneHeader) == kSceneHeaderSize, "SceneHeader must be 256 bytes");
+
 
 #pragma pack(push, 8)
 struct FrameHeader {
@@ -61,6 +121,36 @@ private:
     void* mapping_ = nullptr;
     size_t size_ = 0;
     uint32_t frame_index_ = 0;
+};
+
+// ----------------------------------------------------------------------
+// Scene bridge (reader side). The addon creates the mapping and writes to
+// it; the core opens it and polls for scene updates.
+// ----------------------------------------------------------------------
+class SceneMem {
+public:
+    explicit SceneMem(const std::wstring& name);
+    ~SceneMem();
+
+    SceneMem(const SceneMem&) = delete;
+    SceneMem& operator=(const SceneMem&) = delete;
+
+    // Attach to the mapping (best effort; safe to call repeatedly).
+    bool open();
+    bool is_open() const { return view_ != nullptr; }
+    void close();
+
+    // Copy out a new scene if `epoch` changed and the write was consistent.
+    // Returns false (and leaves `out` untouched) otherwise.
+    bool read_scene(SceneData& out);
+
+private:
+    bool consistent_copy(SceneData& out);
+
+    std::wstring name_;
+    void* mapping_ = nullptr;
+    void* view_ = nullptr;
+    uint32_t last_epoch_ = 0;
 };
 
 } // namespace rstr2

@@ -1,20 +1,22 @@
-// Rstr2 Phase 2 - DXR ray tracing shader library (shader model 6.3, lib_6_3).
+// Rstr2 Phase 3 - DXR ray tracing shader library (shader model 6.5, lib_6_5).
 //
-// Renders ONE hardcoded triangle (3 vertices in the z=0 plane) with simple
-// Lambert shading. Output is written to a RWBuffer<float4> (RGBA32F) which the
-// native core copies into Win32 shared memory for the Blender addon to read.
-//
-// NOTE: the spec text said "RWTexture2D gOutput". A buffer resource cannot be
-// bound to RWTexture2D, so we declare it as RWBuffer<float4> and index it
-// linearly (y * width + x). This is the only deviation required to make the
-// "output DEFAULT+RW buffer" requirement actually work.
+// Ray-traces a world-space triangle soup supplied by the native core: the
+// BLAS/TLAS are built from the scene bridge, and the camera basis arrives via
+// a constant buffer. Output is written to a RWBuffer<float4> (RGBA32F) at
+// linear index (y * width + x); the first row of the buffer is the TOP.
 
 RWBuffer<float4> gOutput : register(u0);
 RaytracingAccelerationStructure SceneBVH : register(t0);
+StructuredBuffer<float3> Vertices : register(t1);
+StructuredBuffer<uint> Indices : register(t2);
 
-// Per-hit vertex buffer, supplied via the hit group's local root signature
-// (root SRV, register t0, space1).
-StructuredBuffer<float3> Vertices : register(t0, space1);
+cbuffer Camera : register(b0) {
+    float3 camOrigin;
+    float3 camRight;
+    float3 camUp;
+    float3 camForward;
+    float  camTanHalfFovY;
+};
 
 struct RayPayload {
     float4 color;
@@ -35,17 +37,13 @@ void raygenMain() {
     ndc.y = -ndc.y;
 
     float aspect = float(dim.x) / float(dim.y);
-    float tanHalf = tan(0.45f); // ~half FOV
-
-    // Camera at (0, 0.6, -2.2). The triangle lives in the z=0 plane, so the
-    // camera must look toward +z to actually hit it. (The brief said "looking
-    // -z"; taken literally that would miss the triangle entirely and render a
-    // black frame, so we use +z to produce a visible result.)
-    float3 origin = float3(0.0f, 0.6f, -2.2f);
-    float3 dir = normalize(float3(ndc.x * aspect * tanHalf, ndc.y * tanHalf, 1.0f));
+    float3 dir = normalize(
+        camForward +
+        ndc.x * aspect * camTanHalfFovY * camRight +
+        ndc.y * camTanHalfFovY * camUp);
 
     RayDesc ray;
-    ray.Origin = origin;
+    ray.Origin = camOrigin;
     ray.Direction = dir;
     ray.TMin = 0.001f;
     ray.TMax = 1000.0f;
@@ -54,7 +52,7 @@ void raygenMain() {
     payload.color = float4(0.0f, 0.0f, 0.0f, 1.0f);
 
     // TraceRay(AS, flags, mask, rayContribution, multiplier, missIndex, ray, payload)
-    TraceRay(SceneBVH, RAY_FLAG_NONE, 1, 0, 1, 0, ray, payload);
+    TraceRay(SceneBVH, RAY_FLAG_NONE, 0xFF, 0, 1, 0, ray, payload);
 
     gOutput[idx.y * dim.x + idx.x] = payload.color;
 }
@@ -67,27 +65,26 @@ void missMain(inout RayPayload payload) {
 
 [shader("closesthit")]
 void hitMain(inout RayPayload payload, in HitAttribs attribs) {
-    float3 bary = float3(
-        1.0f - attribs.bary.x - attribs.bary.y,
-        attribs.bary.x,
-        attribs.bary.y);
+    uint prim = PrimitiveIndex();
+    uint i0 = Indices[prim * 3 + 0];
+    uint i1 = Indices[prim * 3 + 1];
+    uint i2 = Indices[prim * 3 + 2];
 
-    // Per-vertex base colors: red / green / blue.
-    float3 c0 = float3(0.90f, 0.20f, 0.20f);
-    float3 c1 = float3(0.20f, 0.90f, 0.20f);
-    float3 c2 = float3(0.20f, 0.40f, 0.90f);
-    float3 base = bary.x * c0 + bary.y * c1 + bary.z * c2;
+    float3 p0 = Vertices[i0];
+    float3 p1 = Vertices[i1];
+    float3 p2 = Vertices[i2];
 
-    // Geometric normal from the vertex buffer (planar triangle).
-    float3 e1 = Vertices[1] - Vertices[0];
-    float3 e2 = Vertices[2] - Vertices[0];
-    float3 N = normalize(cross(e1, e2));
+    // Geometric normal (vertices are already in world space).
+    float3 N = normalize(cross(p1 - p0, p2 - p0));
     float3 rd = WorldRayDirection();
     if (dot(N, rd) > 0.0f) N = -N; // face the camera
 
+    // Simple shading for Phase 3: normal-tinted base with a fixed key light.
+    // (Many lights / ReSTIR DI arrive in Phase 4.)
+    float3 base = abs(N) * 0.55f + 0.20f;
     float3 lightDir = normalize(float3(0.4f, 0.8f, -0.3f));
     float ndl = max(dot(N, lightDir), 0.0f);
+    float3 color = base * (0.25f + 0.75f * ndl);
 
-    float3 color = base * (0.2f + 0.8f * ndl); // ambient + Lambert
     payload.color = float4(color, 1.0f);
 }
