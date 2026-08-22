@@ -48,6 +48,15 @@ Push to GitHub. The `build-core` workflow compiles `core/` on a Windows runner
 and uploads `Rstr2Core-win64` as an artifact (a few MB).
 Download it from the repo's Actions tab > latest run > Artifacts.
 
+Unzip it to `bin/` in this repo:
+
+```
+D:\blender\dev\Rstr2\bin\Rstr2Core.exe
+```
+
+The addon will look for the core there by default (configurable in addon
+preferences once Phase 2 wires up the shared-memory bridge).
+
 ## References
 
 - Malt (bnpr/Malt) - external-process viewport streaming pattern
