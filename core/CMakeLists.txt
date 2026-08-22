@@ -84,4 +84,8 @@ add_custom_command(TARGET Rstr2Core POST_BUILD
 
 if(WIN32)
     target_link_libraries(Rstr2Core PRIVATE user32 d3d12 dxgi dxguid)
+    # DXR driver call chains (notably CreateStateObject / device init) can
+    # exceed the 1 MB default thread stack and crash with STATUS_STACK_OVERFLOW
+    # (0xC00000FD) on some drivers/GPUs. Reserve a larger stack up front.
+    target_link_options(Rstr2Core PRIVATE "/STACK:16777216")
 endif()

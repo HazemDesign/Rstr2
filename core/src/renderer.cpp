@@ -78,12 +78,16 @@ Renderer::~Renderer() {
 bool Renderer::init(int width, int height, std::string& error) {
     width_ = width;
     height_ = height;
+    std::fprintf(stderr, "Rstr2Core: init begin\n");
 
     if (!load_shader_bytecode(error)) return false;
+    std::fprintf(stderr, "Rstr2Core: init shader ok\n");
     (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     if (!init_dxr(error)) return false;
+    std::fprintf(stderr, "Rstr2Core: init dxr ok\n");
     if (!create_resources(error)) return false;
+    std::fprintf(stderr, "Rstr2Core: init resources ok\n");
 
     // Default fallback scene (hardcoded triangle) so we always have something
     // to render before/without the addon scene bridge.
@@ -91,9 +95,13 @@ bool Renderer::init(int width, int height, std::string& error) {
     have_scene_ = true;
 
     if (!build_scene_accel(error)) return false;
+    std::fprintf(stderr, "Rstr2Core: init accel ok\n");
     if (!create_root_signatures(error)) return false;
+    std::fprintf(stderr, "Rstr2Core: init rootsig ok\n");
     if (!create_pipeline(error)) return false;
+    std::fprintf(stderr, "Rstr2Core: init pipeline ok\n");
     if (!create_sbt(error)) return false;
+    std::fprintf(stderr, "Rstr2Core: init sbt ok\n");
 
     return true;
 }
@@ -516,6 +524,7 @@ bool Renderer::create_root_signatures(std::string& error) {
 }
 
 bool Renderer::create_pipeline(std::string& error) {
+    std::fprintf(stderr, "Rstr2Core: create_pipeline begin\n");
     std::vector<D3D12_STATE_SUBOBJECT> subs;
     subs.reserve(7);
 
@@ -589,6 +598,8 @@ bool Renderer::create_pipeline(std::string& error) {
     so.pSubobjects = subs.data();
 
     HRESULT hr = device_->CreateStateObject(&so, IID_PPV_ARGS(&state_object_));
+    std::fprintf(stderr, "Rstr2Core: CreateStateObject returned 0x%08X\n",
+                 static_cast<unsigned>(hr));
     if (FAILED(hr)) {
         error = "Rstr2: failed to create DXR state object (HRESULT 0x" +
                 std::to_string(static_cast<unsigned>(hr)) + ").";
