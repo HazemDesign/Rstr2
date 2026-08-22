@@ -190,6 +190,7 @@ bool Renderer::init_dxr(std::string& error) {
 
 bool Renderer::create_resources(std::string& error) {
     HRESULT hr;
+    std::fprintf(stderr, "Rstr2Core: create_resources begin\n");
 
     // Shader-visible CBV_SRV_UAV heap: [0]=TLAS SRV, [1]=Vertices SRV,
     // [2]=Indices SRV, [3]=output UAV. (SRVs 0..2 are filled by build_scene_accel.)
@@ -197,8 +198,10 @@ bool Renderer::create_resources(std::string& error) {
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     hd.NumDescriptors = 4;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    std::fprintf(stderr, "Rstr2Core: create_resources heap\n");
     hr = device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap_));
     if (FAILED(hr)) { error = "Rstr2: failed to create descriptor heap."; return false; }
+    std::fprintf(stderr, "Rstr2Core: create_resources heap ok\n");
 
     const UINT64 pixel_count = static_cast<UINT64>(width_) * static_cast<UINT64>(height_);
     const UINT64 bytes = pixel_count * 16u; // RGBA32F
@@ -213,6 +216,7 @@ bool Renderer::create_resources(std::string& error) {
     hr = device_->CreateCommittedResource(
         &kDefaultHeap, D3D12_HEAP_FLAG_NONE, &ob,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&output_));
+    std::fprintf(stderr, "Rstr2Core: created output buffer\n");
     if (FAILED(hr)) { error = "Rstr2: failed to create output buffer."; return false; }
 
     D3D12_RESOURCE_DESC rb = ob;
@@ -244,6 +248,7 @@ bool Renderer::create_resources(std::string& error) {
     hr = device_->CreateCommittedResource(
         &kUploadHeap, D3D12_HEAP_FLAG_NONE, &cb,
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&cam_cbv_));
+    std::fprintf(stderr, "Rstr2Core: created camera cbv\n");
     if (FAILED(hr)) { error = "Rstr2: failed to create camera constant buffer."; return false; }
 
     return true;
