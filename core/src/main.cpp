@@ -7,6 +7,12 @@
 //                        the supplied camera, publish RGBA32F pixels to the
 //                        frame shared memory, and idle until Ctrl+C so the
 //                        addon can attach and read frames.
+//
+// All DXR init and the render loop run on a worker thread with an EXPLICIT
+// large stack. Some GPU drivers (notably new Blackwell DXR paths) consume a
+// very large amount of stack per D3D12 call; a thread with a 512 MB stack is
+// immune to the PE-header /STACK setting not taking effect and avoids the
+// STATUS_STACK_OVERFLOW we otherwise hit during resource/descriptor creation.
 
 #include <cstdio>
 #include <cstdlib>
@@ -17,6 +23,7 @@
 
 #include <windows.h>
 #include <cstdarg>
+#include <process.h>
 
 #include "shared_mem.h"
 #include "renderer.h"
@@ -52,6 +59,75 @@ void print_help() {
         "  --height H   frame height (default 540)\n"
         "  --shm   NAME shared-memory mapping name for published frames (default Local\\Rstr2Frame_v1)\n"
         "  --ci         print version and exit 0 (no GPU)\n");
+}
+
+// Arguments + result handed to the worker thread.
+struct WorkerArgs {
+    int width = 960;
+    int height = 540;
+    std::wstring shm_name = L"Local\\Rstr2Frame_v1";
+    int exit_code = 0;
+};
+
+unsigned __stdcall worker_main(void* param) {
+    WorkerArgs* a = static_cast<WorkerArgs*>(param);
+    rlogf("Rstr2Core: worker thread started (512MB stack)\n");
+
+    const size_t pixel_bytes = static_cast<size_t>(a->width) * static_cast<size_t>(a->height) * 16u;
+    const size_t shm_size = 256 + pixel_bytes;
+
+    rstr2::SharedMem shm(a->shm_name, shm_size);
+    if (!shm.valid()) {
+        rlogf("Rstr2Core: failed to create shared memory '%ls' (%zu bytes)\n",
+                     a->shm_name.c_str(), shm_size);
+        a->exit_code = 1;
+        return 1;
+    }
+
+    rstr2::Renderer renderer;
+    std::string err;
+    if (!renderer.init(a->width, a->height, err)) {
+        rlogf("Rstr2Core: renderer init failed: %s\n", err.c_str());
+        a->exit_code = 1;
+        return 1;
+    }
+
+    // Scene bridge (addon -> core). Created lazily by the addon; we open it
+    // once it appears and poll it for updates each frame.
+    rstr2::SceneMem scene(L"Local\\Rstr2Scene_v1");
+
+    std::vector<float> pixels(static_cast<size_t>(a->width) * static_cast<size_t>(a->height) * 4u);
+
+    SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
+    rlogf("Rstr2Core: rendering %dx%d, waiting for scene/ctrl-c\n", a->width, a->height);
+
+    while (g_running.load()) {
+        if (!scene.is_open()) scene.open();
+        if (scene.is_open()) {
+            rstr2::SceneData sd;
+            if (scene.read_scene(sd)) {
+                rlogf("Rstr2Core: scene received v=%u i=%u\n",
+                             (unsigned)sd.vertices.size() / 3u, (unsigned)sd.indices.size());
+                std::string se;
+                if (!renderer.set_scene(sd, se)) {
+                    rlogf("Rstr2Core: set_scene failed: %s\n", se.c_str());
+                }
+            }
+        }
+
+        std::string re;
+        if (!renderer.render_frame(pixels.data(), re)) {
+            rlogf("Rstr2Core: render failed: %s\n", re.c_str());
+        } else {
+            shm.publish_frame(pixels.data(), a->width, a->height);
+        }
+
+        Sleep(33); // ~30 fps; cheap for a single-bounce triangle soup.
+    }
+
+    rlogf("Rstr2Core: shutting down\n");
+    a->exit_code = 0;
+    return 0;
 }
 
 } // namespace
@@ -100,56 +176,23 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    const size_t pixel_bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 16u;
-    const size_t shm_size = 256 + pixel_bytes;
+    WorkerArgs args;
+    args.width = width;
+    args.height = height;
+    args.shm_name = shm_name;
 
-    rstr2::SharedMem shm(shm_name, shm_size);
-    if (!shm.valid()) {
-        rlogf("Rstr2Core: failed to create shared memory '%ls' (%zu bytes)\n",
-                     shm_name.c_str(), shm_size);
+    // Run all DXR init + render loop on a worker thread with an explicit large
+    // stack (512 MB) so per-call driver stack usage cannot overflow us.
+    const SIZE_T kThreadStack = 512u * 1024u * 1024u;
+    HANDLE hThread = reinterpret_cast<HANDLE>(
+        _beginthreadex(nullptr, static_cast<unsigned>(kThreadStack),
+                      worker_main, &args, 0, nullptr));
+    if (hThread == nullptr) {
+        rlogf("Rstr2Core: failed to create worker thread (%lu)\n", GetLastError());
         return 1;
     }
 
-    rstr2::Renderer renderer;
-    std::string err;
-    if (!renderer.init(width, height, err)) {
-        rlogf("Rstr2Core: renderer init failed: %s\n", err.c_str());
-        return 1;
-    }
-
-    // Scene bridge (addon -> core). Created lazily by the addon; we open it
-    // once it appears and poll it for updates each frame.
-    rstr2::SceneMem scene(L"Local\\Rstr2Scene_v1");
-
-    std::vector<float> pixels(width * height * 4);
-
-    SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
-    rlogf("Rstr2Core: rendering %dx%d, waiting for scene/ctrl-c\n", width, height);
-
-    while (g_running.load()) {
-        if (!scene.is_open()) scene.open();
-        if (scene.is_open()) {
-            rstr2::SceneData sd;
-            if (scene.read_scene(sd)) {
-                rlogf("Rstr2Core: scene received v=%u i=%u\n",
-                             (unsigned)sd.vertices.size() / 3u, (unsigned)sd.indices.size());
-                std::string se;
-                if (!renderer.set_scene(sd, se)) {
-                    rlogf("Rstr2Core: set_scene failed: %s\n", se.c_str());
-                }
-            }
-        }
-
-        std::string re;
-        if (!renderer.render_frame(pixels.data(), re)) {
-            rlogf("Rstr2Core: render failed: %s\n", re.c_str());
-        } else {
-            shm.publish_frame(pixels.data(), width, height);
-        }
-
-        Sleep(33); // ~30 fps; cheap for a single-bounce triangle soup.
-    }
-
-    rlogf("Rstr2Core: shutting down\n");
-    return 0;
+    WaitForSingleObject(hThread, INFINITE);
+    CloseHandle(hThread);
+    return args.exit_code;
 }
