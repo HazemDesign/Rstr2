@@ -1,12 +1,12 @@
 // Rstr2 Phase 2 - D3D12 / DXR renderer implementation. See renderer.h.
 
 #include "renderer.h"
-#include "raytracing_cso.h"
 
 #include <windows.h>
 #include <dxgi1_6.h>
 #include <cstring>
 #include <cstdio>
+#include <fstream>
 #include <vector>
 #include <string>
 
@@ -56,12 +56,7 @@ bool Renderer::init(int width, int height, std::string& error) {
     width_ = width;
     height_ = height;
 
-    if (g_raytracing_cso_size == 0) {
-        error = "Rstr2: raytracing shader bytecode is not embedded "
-                "(raytracing_cso.h is a stub). Build with dxc available so that "
-                "shaders/raytracing.hlsl is compiled into core/src/raytracing_cso.h.";
-        return false;
-    }
+    if (!load_shader_bytecode(error)) return false;
 
     (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED); // not fatal if already init
 
@@ -72,6 +67,41 @@ bool Renderer::init(int width, int height, std::string& error) {
     if (!create_pipeline(error)) return false;
     if (!create_sbt(error)) return false;
 
+    return true;
+}
+
+bool Renderer::load_shader_bytecode(std::string& error) {
+    // Locate <exedir>/raytracing.cso (placed next to the exe by the build).
+    wchar_t mod[1024] = {};
+    DWORD n = GetModuleFileNameW(nullptr, mod, static_cast<DWORD>(_countof(mod)));
+    if (n == 0 || n >= _countof(mod)) {
+        error = "Rstr2: failed to resolve executable path.";
+        return false;
+    }
+    std::wstring path(mod);
+    auto slash = path.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) path = path.substr(0, slash + 1);
+    path += L"raytracing.cso";
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+        error = "Rstr2: raytracing.cso not found next to the executable. "
+                "Build the project so shaders/raytracing.hlsl is compiled to raytracing.cso.";
+        return false;
+    }
+    f.seekg(0, std::ios::end);
+    std::streamoff sz = f.tellg();
+    if (sz <= 0) {
+        error = "Rstr2: raytracing.cso is empty.";
+        return false;
+    }
+    f.seekg(0, std::ios::beg);
+    shader_bytecode_.resize(static_cast<size_t>(sz));
+    f.read(reinterpret_cast<char*>(shader_bytecode_.data()), sz);
+    if (!f) {
+        error = "Rstr2: failed to read raytracing.cso.";
+        return false;
+    }
     return true;
 }
 
@@ -381,9 +411,9 @@ bool Renderer::create_root_signatures(std::string& error) {
     D3D12_ROOT_PARAMETER lparam = {};
     lparam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     lparam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    lparam.SRV.ShaderRegister = 0;
-    lparam.SRV.RegisterSpace = 1;
-    lparam.SRV.Flags = D3D12_ROOT_SRV_FLAG_NONE;
+    lparam.Descriptor.ShaderRegister = 0;
+    lparam.Descriptor.RegisterSpace = 1;
+    lparam.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_NONE;
 
     D3D12_ROOT_SIGNATURE_DESC lrs = {};
     lrs.NumParameters = 1;
@@ -419,8 +449,8 @@ bool Renderer::create_pipeline(std::string& error) {
     exp[1].Name = L"missMain";
     exp[2].Name = L"hitMain";
     D3D12_DXIL_LIBRARY_DESC lib = {};
-    lib.DXILLibrary.pShaderBytecode = g_raytracing_cso;
-    lib.DXILLibrary.SizeInBytes = g_raytracing_cso_size;
+    lib.DXILLibrary.pShaderBytecode = shader_bytecode_.data();
+    lib.DXILLibrary.BytecodeLength = static_cast<UINT>(shader_bytecode_.size());
     lib.NumExports = 3;
     lib.pExports = exp;
     {

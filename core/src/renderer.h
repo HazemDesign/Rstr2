@@ -7,8 +7,10 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <wrl/client.h>
 #include <d3d12.h>
+#include <dxgi1_6.h>
 
 namespace rstr2 {
 
@@ -39,10 +41,14 @@ private:
     bool create_root_signatures(std::string& error);
     bool create_pipeline(std::string& error);
     bool create_sbt(std::string& error);
+    bool load_shader_bytecode(std::string& error);
     void wait_for_gpu();
 
     int width_ = 0;
     int height_ = 0;
+
+    // Raytracing shader bytecode (loaded at runtime from <exedir>/raytracing.cso).
+    std::vector<uint8_t> shader_bytecode_;
 
     // D3D12 objects.
     Microsoft::WRL::ComPtr<IDXGIFactory1>        factory_;

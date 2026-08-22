@@ -23,4 +23,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Rstr2Core-win64
-          path: build/Release/Rstr2Core.exe
+          path: |
+            build/Release/Rstr2Core.exe
+            build/Release/raytracing.cso
