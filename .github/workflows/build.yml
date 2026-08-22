@@ -15,8 +15,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Authenticate the release lookup so we don't burn the unauthenticated
+          # per-IP rate limit (60/hr) on the Windows runner. GITHUB_TOKEN can
+          # read any public repo's release metadata and raises the limit to 5000/hr.
+          $apiHeaders = @{
+            'User-Agent'    = 'rstr2-setup'
+            'Authorization' = "Bearer ${{ secrets.GITHUB_TOKEN }}"
+          }
           try {
-            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest" -Headers @{ 'User-Agent' = 'rstr2-setup' }
+            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest" -Headers $apiHeaders
             $asset = $rel.assets | Where-Object { $_.name -like 'dxc*.zip' -and $_.name -notlike '*arm*' -and $_.name -notlike '*linux*' } | Select-Object -First 1
             if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -like 'dxc*.zip' -and $_.name -notlike '*arm*' } | Select-Object -First 1 }
             if (-not $asset) { throw "No dxc asset in latest DirectXShaderCompiler release" }
