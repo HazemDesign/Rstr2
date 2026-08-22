@@ -15,7 +15,8 @@ jobs:
         shell: pwsh
         run: |
           $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest"
-          $asset = $rel.assets | Where-Object { $_.name -like 'dxc*.zip' } | Select-Object -First 1
+          $asset = $rel.assets | Where-Object { $_.name -like 'dxc*.zip' -and $_.name -notlike '*arm*' } | Select-Object -First 1
+          if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -like 'dxc*.zip' } | Select-Object -First 1 }
           if (-not $asset) { throw "No dxc asset in latest DirectXShaderCompiler release" }
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile dxc.zip
           Expand-Archive dxc.zip dxc_tool -Force
