@@ -30,7 +30,7 @@ endif()
 message(STATUS "Rstr2Core: using dxc at ${DXC_EXECUTABLE}")
 add_custom_command(
     OUTPUT ${CSO_PATH}
-    COMMAND ${DXC_EXECUTABLE} -T lib_6_3 -Fo ${CSO_PATH} ${SHADER_SRC}
+    COMMAND ${DXC_EXECUTABLE} -T lib_6_5 -HV 2021 -Fo ${CSO_PATH} ${SHADER_SRC}
     DEPENDS ${SHADER_SRC}
     COMMENT "Compiling raytracing.hlsl -> raytracing.cso (dxc)")
 
