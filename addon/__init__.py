@@ -345,8 +345,11 @@ class Rstr2Engine(RenderEngine):
                 reader = shm.CoreFrameReader()
                 if reader.open():
                     self._reader = reader
-            except Exception:
-                pass
+                    self._core_msg = "frame map open"
+                else:
+                    self._core_msg = "frame map not open (core not alive?)"
+            except Exception as e:
+                self._core_msg = "frame open err: %s" % str(e)[:40]
 
         return self._reader is not None
 
