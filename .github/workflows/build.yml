@@ -14,17 +14,36 @@ jobs:
       - name: Fetch pinned dxc (DirectXShaderCompiler)
         shell: pwsh
         run: |
-          $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest"
-          $asset = $rel.assets | Where-Object { $_.name -like '*x64*' -or $_.name -like '*win64*' } | Select-Object -First 1
-          if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -like 'dxc*.zip' -and $_.name -notlike '*arm*' } | Select-Object -First 1 }
-          if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -like 'dxc*.zip' } | Select-Object -First 1 }
-          if (-not $asset) { throw "No dxc asset in latest DirectXShaderCompiler release" }
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile dxc.zip
-          Expand-Archive dxc.zip dxc_tool -Force
-          $dxc = Join-Path $PWD "dxc_tool\bin\x64\dxc.exe"
-          if (-not (Test-Path $dxc)) { $dxc = (Get-ChildItem dxc_tool -Recurse -Filter dxc.exe | Select-Object -First 1).FullName }
-          "DXC_EXECUTABLE=$dxc" >> $env:GITHUB_ENV
-          "Using dxc: $dxc"
+          $ErrorActionPreference = 'Stop'
+          try {
+            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest" -Headers @{ 'User-Agent' = 'rstr2-setup' }
+            $asset = $rel.assets | Where-Object { $_.name -like '*x64*' -or $_.name -like '*win64*' } | Select-Object -First 1
+            if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -like 'dxc*.zip' -and $_.name -notlike '*arm*' } | Select-Object -First 1 }
+            if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -like 'dxc*.zip' } | Select-Object -First 1 }
+            if (-not $asset) { throw "No dxc asset in latest DirectXShaderCompiler release" }
+            Write-Host "dxc asset: $($asset.name) -> $($asset.browser_download_url)"
+            $ok = $false
+            for ($i = 1; $i -le 3; $i++) {
+              try {
+                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile dxc.zip -TimeoutSec 300 -Headers @{ 'User-Agent' = 'rstr2-setup' }
+                Expand-Archive dxc.zip dxc_tool -Force
+                $ok = $true
+                break
+              } catch {
+                Write-Host "dxc download/extract attempt $i failed: $($_.Exception.Message)"
+                Start-Sleep -Seconds 5
+              }
+            }
+            if (-not $ok) { throw "Failed to download/extract dxc after retries" }
+            $dxc = Join-Path $PWD "dxc_tool\bin\x64\dxc.exe"
+            if (-not (Test-Path $dxc)) { $dxc = (Get-ChildItem dxc_tool -Recurse -Filter dxc.exe | Select-Object -First 1).FullName }
+            if (-not (Test-Path $dxc)) { throw "dxc.exe not found after extraction" }
+            "DXC_EXECUTABLE=$dxc" >> $env:GITHUB_ENV
+            "Using dxc: $dxc"
+          } catch {
+            Write-Error "dxc fetch failed: $($_.Exception.Message)"
+            exit 1
+          }
 
       - name: Configure
         run: cmake -S core -B build -A x64
