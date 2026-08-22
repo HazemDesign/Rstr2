@@ -304,6 +304,8 @@ bool Renderer::build_scene_accel(std::string& error) {
         error = "Rstr2: scene has no triangles.";
         return false;
     }
+    rlogf("Rstr2Core: build_scene_accel begin (v=%llu i=%llu)\n",
+                 (unsigned long long)vcount, (unsigned long long)icount);
     const UINT stride = 12; // float3
 
     // ---- Vertex buffer (UPLOAD, world space) ----
@@ -318,6 +320,7 @@ bool Renderer::build_scene_accel(std::string& error) {
         &kUploadHeap, D3D12_HEAP_FLAG_NONE, &vbd,
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&vertex_buf_));
     if (FAILED(hr)) { error = "Rstr2: failed to create vertex buffer."; return false; }
+    rlogf("Rstr2Core: accel vertex buf\n");
     {
         void* mapped = nullptr;
         vertex_buf_->Map(0, nullptr, &mapped);
@@ -337,6 +340,7 @@ bool Renderer::build_scene_accel(std::string& error) {
         &kUploadHeap, D3D12_HEAP_FLAG_NONE, &ibd,
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&index_buf_));
     if (FAILED(hr)) { error = "Rstr2: failed to create index buffer."; return false; }
+    rlogf("Rstr2Core: accel index buf\n");
     {
         void* mapped = nullptr;
         index_buf_->Map(0, nullptr, &mapped);
@@ -378,6 +382,7 @@ bool Renderer::build_scene_accel(std::string& error) {
         &kDefaultHeap, D3D12_HEAP_FLAG_NONE, &as_desc,
         D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&blas_));
     if (FAILED(hr)) { error = "Rstr2: failed to create BLAS buffer."; return false; }
+    rlogf("Rstr2Core: accel blas\n");
 
     D3D12_RESOURCE_DESC scratch_desc = as_desc;
     scratch_desc.Width = blas_pre.ScratchDataSizeInBytes;
@@ -385,6 +390,7 @@ bool Renderer::build_scene_accel(std::string& error) {
         &kDefaultHeap, D3D12_HEAP_FLAG_NONE, &scratch_desc,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&blas_scratch_));
     if (FAILED(hr)) { error = "Rstr2: failed to create BLAS scratch."; return false; }
+    rlogf("Rstr2Core: accel blas scratch\n");
 
     // ---- Instance buffer (identity transform, single instance) ----
     D3D12_RAYTRACING_INSTANCE_DESC inst = {};
@@ -406,6 +412,7 @@ bool Renderer::build_scene_accel(std::string& error) {
         &kUploadHeap, D3D12_HEAP_FLAG_NONE, &ib,
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&instance_buf_));
     if (FAILED(hr)) { error = "Rstr2: failed to create instance buffer."; return false; }
+    rlogf("Rstr2Core: accel instance\n");
     {
         void* mapped = nullptr;
         instance_buf_->Map(0, nullptr, &mapped);
@@ -429,12 +436,14 @@ bool Renderer::build_scene_accel(std::string& error) {
         &kDefaultHeap, D3D12_HEAP_FLAG_NONE, &as_desc,
         D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&tlas_));
     if (FAILED(hr)) { error = "Rstr2: failed to create TLAS buffer."; return false; }
+    rlogf("Rstr2Core: accel tlas\n");
 
     scratch_desc.Width = tlas_pre.ScratchDataSizeInBytes;
     hr = device_->CreateCommittedResource(
         &kDefaultHeap, D3D12_HEAP_FLAG_NONE, &scratch_desc,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&tlas_scratch_));
     if (FAILED(hr)) { error = "Rstr2: failed to create TLAS scratch."; return false; }
+    rlogf("Rstr2Core: accel tlas scratch\n");
 
     // ---- Record + execute the two builds ----
     hr = cmd_list_->Reset(allocator_.Get(), nullptr);
@@ -467,6 +476,7 @@ bool Renderer::build_scene_accel(std::string& error) {
     ID3D12CommandList* lists[] = { cmd_list_.Get() };
     queue_->ExecuteCommandLists(1, lists);
     wait_for_gpu();
+    rlogf("Rstr2Core: accel built\n");
 
     // ---- TLAS SRV (heap[0]), Vertices SRV (heap[1]), Indices SRV (heap[2]) ----
     CD3DX12_CPU_DESCRIPTOR_HANDLE h0(heap_->GetCPUDescriptorHandleForHeapStart());
@@ -658,6 +668,7 @@ bool Renderer::create_pipeline(std::string& error) {
 }
 
 bool Renderer::create_sbt(std::string& error) {
+    rlogf("Rstr2Core: create_sbt begin\n");
     const UINT idSize = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
     const UINT align = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;
     sbt_raygen_offset_ = 0;
@@ -678,6 +689,7 @@ bool Renderer::create_sbt(std::string& error) {
         &kUploadHeap, D3D12_HEAP_FLAG_NONE, &sd,
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&sbt_));
     if (FAILED(hr)) { error = "Rstr2: failed to create SBT buffer."; return false; }
+    rlogf("Rstr2Core: sbt buffer\n");
 
     unsigned char* mapped = nullptr;
     sbt_->Map(0, nullptr, reinterpret_cast<void**>(&mapped));

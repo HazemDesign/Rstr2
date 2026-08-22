@@ -182,8 +182,11 @@ int main(int argc, char** argv) {
     args.shm_name = shm_name;
 
     // Run all DXR init + render loop on a worker thread with an explicit large
-    // stack (512 MB) so per-call driver stack usage cannot overflow us.
-    const SIZE_T kThreadStack = 512u * 1024u * 1024u;
+    // stack (3 GB) so per-call driver stack usage cannot overflow us. The RTX
+    // 5050 (Blackwell) D3D12 driver path consumes an abnormal amount of stack
+    // per CreateCommittedResource/CreateUnorderedAccessView call; 3 GB gives us
+    // ample headroom for the whole init sequence.
+    const SIZE_T kThreadStack = 3u * 1024u * 1024u * 1024u; // 3 GB
     HANDLE hThread = reinterpret_cast<HANDLE>(
         _beginthreadex(nullptr, static_cast<unsigned>(kThreadStack),
                       worker_main, &args, 0, nullptr));
