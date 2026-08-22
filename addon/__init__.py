@@ -247,14 +247,17 @@ class Rstr2Engine(RenderEngine):
         texture = self._upload_texture(pixels)
 
         shader = gpu.shader.from_builtin("IMAGE")
-        batch = gpu.batch.batch_for_shader(
-            shader,
-            "TRI_FAN",
-            {
-                "pos": [(0, 0), (width, 0), (width, height), (0, height)],
-                "texCoord": [(0, 0), (1, 0), (1, 1), (0, 1)],
-            },
-        )
+        # Blender 5.x removed the `gpu.batch` helper; build the batch from
+        # gpu.types directly so this works across versions.
+        from gpu.types import GPUVertBuf, GPUVertFormat, GPUBatch
+
+        vformat = GPUVertFormat()
+        pos_id = vformat.attr_add(id="pos", comp_type="F32", len=2)
+        uv_id = vformat.attr_add(id="texCoord", comp_type="F32", len=2)
+        vbo = GPUVertBuf(vformat, 4)
+        vbo.attr_fill(id=pos_id, data=[(0, 0), (width, 0), (width, height), (0, height)])
+        vbo.attr_fill(id=uv_id, data=[(0, 0), (1, 0), (1, 1), (0, 1)])
+        batch = GPUBatch(type="TRI_FAN", buf=vbo)
 
         gpu.state.blend_set("ALPHA_PREMULT")
         shader.uniform_sampler("image", texture)
