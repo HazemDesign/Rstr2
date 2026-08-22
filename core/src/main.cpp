@@ -16,11 +16,26 @@
 #include <atomic>
 
 #include <windows.h>
+#include <cstdarg>
 
 #include "shared_mem.h"
 #include "renderer.h"
 
 namespace {
+
+// Timestamped diagnostic line to stderr (redirected to bin/Rstr2Core.log).
+static void rlogf(const char* fmt, ...) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    std::fprintf(stderr, "[%02u:%02u:%02u.%03u] %s\n",
+                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+    std::fflush(stderr);
+}
 
 std::atomic<bool> g_running{true};
 
@@ -47,7 +62,7 @@ int main(int argc, char** argv) {
     // bin/Rstr2Core.log so the user can read why we failed to start.
     setvbuf(stderr, nullptr, _IONBF, 0);
     setvbuf(stdout, nullptr, _IONBF, 0);
-    std::fprintf(stderr, "Rstr2Core: process starting\n");
+    rlogf("Rstr2Core: process starting\n");
 
     int width = 960;
     int height = 540;
@@ -69,7 +84,7 @@ int main(int argc, char** argv) {
             print_help();
             return 0;
         } else {
-            std::fprintf(stderr, "Rstr2Core: unknown argument '%s'\n", a.c_str());
+            rlogf("Rstr2Core: unknown argument '%s'\n", a.c_str());
             print_help();
             return 2;
         }
@@ -81,7 +96,7 @@ int main(int argc, char** argv) {
     }
 
     if (width <= 0 || height <= 0) {
-        std::fprintf(stderr, "Rstr2Core: invalid dimensions %dx%d\n", width, height);
+        rlogf("Rstr2Core: invalid dimensions %dx%d\n", width, height);
         return 2;
     }
 
@@ -90,7 +105,7 @@ int main(int argc, char** argv) {
 
     rstr2::SharedMem shm(shm_name, shm_size);
     if (!shm.valid()) {
-        std::fprintf(stderr, "Rstr2Core: failed to create shared memory '%ls' (%zu bytes)\n",
+        rlogf("Rstr2Core: failed to create shared memory '%ls' (%zu bytes)\n",
                      shm_name.c_str(), shm_size);
         return 1;
     }
@@ -98,7 +113,7 @@ int main(int argc, char** argv) {
     rstr2::Renderer renderer;
     std::string err;
     if (!renderer.init(width, height, err)) {
-        std::fprintf(stderr, "Rstr2Core: renderer init failed: %s\n", err.c_str());
+        rlogf("Rstr2Core: renderer init failed: %s\n", err.c_str());
         return 1;
     }
 
@@ -109,25 +124,25 @@ int main(int argc, char** argv) {
     std::vector<float> pixels(width * height * 4);
 
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
-    std::printf("Rstr2Core: rendering %dx%d, waiting for scene/ctrl-c\n", width, height);
+    rlogf("Rstr2Core: rendering %dx%d, waiting for scene/ctrl-c\n", width, height);
 
     while (g_running.load()) {
         if (!scene.is_open()) scene.open();
         if (scene.is_open()) {
             rstr2::SceneData sd;
             if (scene.read_scene(sd)) {
-                std::fprintf(stderr, "Rstr2Core: scene received v=%u i=%u\n",
+                rlogf("Rstr2Core: scene received v=%u i=%u\n",
                              (unsigned)sd.vertices.size() / 3u, (unsigned)sd.indices.size());
                 std::string se;
                 if (!renderer.set_scene(sd, se)) {
-                    std::fprintf(stderr, "Rstr2Core: set_scene failed: %s\n", se.c_str());
+                    rlogf("Rstr2Core: set_scene failed: %s\n", se.c_str());
                 }
             }
         }
 
         std::string re;
         if (!renderer.render_frame(pixels.data(), re)) {
-            std::fprintf(stderr, "Rstr2Core: render failed: %s\n", re.c_str());
+            rlogf("Rstr2Core: render failed: %s\n", re.c_str());
         } else {
             shm.publish_frame(pixels.data(), width, height);
         }
@@ -135,6 +150,6 @@ int main(int argc, char** argv) {
         Sleep(33); // ~30 fps; cheap for a single-bounce triangle soup.
     }
 
-    std::printf("Rstr2Core: shutting down\n");
+    rlogf("Rstr2Core: shutting down\n");
     return 0;
 }

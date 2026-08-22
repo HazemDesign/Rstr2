@@ -87,5 +87,5 @@ if(WIN32)
     # DXR driver call chains (notably CreateStateObject / device init) can
     # exceed the 1 MB default thread stack and crash with STATUS_STACK_OVERFLOW
     # (0xC00000FD) on some drivers/GPUs. Reserve a larger stack up front.
-    target_link_options(Rstr2Core PRIVATE "/STACK:268435456")
+    target_link_options(Rstr2Core PRIVATE "/STACK:1073741824")
 endif()

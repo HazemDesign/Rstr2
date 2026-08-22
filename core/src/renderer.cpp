@@ -6,6 +6,7 @@
 #include <dxgi1_6.h>
 #include <cstring>
 #include <cstdio>
+#include <cstdarg>
 #include <cmath>
 #include <fstream>
 #include <vector>
@@ -49,6 +50,20 @@ HRESULT serialize_root_signature(const D3D12_ROOT_SIGNATURE_DESC& desc,
     return D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, blob, error);
 }
 
+// Timestamped diagnostic line to stderr (redirected to bin/Rstr2Core.log).
+static void rlogf(const char* fmt, ...) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    std::fprintf(stderr, "[%02u:%02u:%02u.%03u] %s\n",
+                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+    std::fflush(stderr);
+}
+
 // Default Phase 2 fallback scene: a single triangle + the matching camera.
 SceneData make_default_scene() {
     SceneData s;
@@ -78,16 +93,16 @@ Renderer::~Renderer() {
 bool Renderer::init(int width, int height, std::string& error) {
     width_ = width;
     height_ = height;
-    std::fprintf(stderr, "Rstr2Core: init begin\n");
+    rlogf("Rstr2Core: init begin\n");
 
     if (!load_shader_bytecode(error)) return false;
-    std::fprintf(stderr, "Rstr2Core: init shader ok\n");
+    rlogf("Rstr2Core: init shader ok\n");
     (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     if (!init_dxr(error)) return false;
-    std::fprintf(stderr, "Rstr2Core: init dxr ok\n");
+    rlogf("Rstr2Core: init dxr ok\n");
     if (!create_resources(error)) return false;
-    std::fprintf(stderr, "Rstr2Core: init resources ok\n");
+    rlogf("Rstr2Core: init resources ok\n");
 
     // Default fallback scene (hardcoded triangle) so we always have something
     // to render before/without the addon scene bridge.
@@ -95,13 +110,13 @@ bool Renderer::init(int width, int height, std::string& error) {
     have_scene_ = true;
 
     if (!build_scene_accel(error)) return false;
-    std::fprintf(stderr, "Rstr2Core: init accel ok\n");
+    rlogf("Rstr2Core: init accel ok\n");
     if (!create_root_signatures(error)) return false;
-    std::fprintf(stderr, "Rstr2Core: init rootsig ok\n");
+    rlogf("Rstr2Core: init rootsig ok\n");
     if (!create_pipeline(error)) return false;
-    std::fprintf(stderr, "Rstr2Core: init pipeline ok\n");
+    rlogf("Rstr2Core: init pipeline ok\n");
     if (!create_sbt(error)) return false;
-    std::fprintf(stderr, "Rstr2Core: init sbt ok\n");
+    rlogf("Rstr2Core: init sbt ok\n");
 
     return true;
 }
@@ -190,7 +205,7 @@ bool Renderer::init_dxr(std::string& error) {
 
 bool Renderer::create_resources(std::string& error) {
     HRESULT hr;
-    std::fprintf(stderr, "Rstr2Core: create_resources begin\n");
+    rlogf("Rstr2Core: create_resources begin\n");
 
     // Shader-visible CBV_SRV_UAV heap: [0]=TLAS SRV, [1]=Vertices SRV,
     // [2]=Indices SRV, [3]=output UAV. (SRVs 0..2 are filled by build_scene_accel.)
@@ -198,10 +213,10 @@ bool Renderer::create_resources(std::string& error) {
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     hd.NumDescriptors = 4;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    std::fprintf(stderr, "Rstr2Core: create_resources heap\n");
+    rlogf("Rstr2Core: create_resources heap\n");
     hr = device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap_));
     if (FAILED(hr)) { error = "Rstr2: failed to create descriptor heap."; return false; }
-    std::fprintf(stderr, "Rstr2Core: create_resources heap ok\n");
+    rlogf("Rstr2Core: create_resources heap ok\n");
 
     const UINT64 pixel_count = static_cast<UINT64>(width_) * static_cast<UINT64>(height_);
     const UINT64 bytes = pixel_count * 16u; // RGBA32F
@@ -216,7 +231,7 @@ bool Renderer::create_resources(std::string& error) {
     hr = device_->CreateCommittedResource(
         &kDefaultHeap, D3D12_HEAP_FLAG_NONE, &ob,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&output_));
-    std::fprintf(stderr, "Rstr2Core: created output buffer\n");
+    rlogf("Rstr2Core: created output buffer\n");
     if (FAILED(hr)) { error = "Rstr2: failed to create output buffer."; return false; }
 
     D3D12_RESOURCE_DESC rb = ob;
@@ -224,6 +239,7 @@ bool Renderer::create_resources(std::string& error) {
     hr = device_->CreateCommittedResource(
         &kDefaultHeap, D3D12_HEAP_FLAG_NONE, &rb,
         D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback_));
+    rlogf("Rstr2Core: created readback buffer");
     if (FAILED(hr)) { error = "Rstr2: failed to create readback buffer."; return false; }
 
     // Output UAV at heap index 3.
@@ -235,7 +251,9 @@ bool Renderer::create_resources(std::string& error) {
     uav.Buffer.StructureByteStride = 0;
     CD3DX12_CPU_DESCRIPTOR_HANDLE h3(heap_->GetCPUDescriptorHandleForHeapStart());
     h3.Offset(3, descriptor_inc_);
+    rlogf("Rstr2Core: create_resources uav");
     device_->CreateUnorderedAccessView(output_.Get(), nullptr, &uav, h3);
+    rlogf("Rstr2Core: created uav");
 
     // Camera constant buffer (UPLOAD, 64 bytes).
     D3D12_RESOURCE_DESC cb = {};
@@ -248,7 +266,7 @@ bool Renderer::create_resources(std::string& error) {
     hr = device_->CreateCommittedResource(
         &kUploadHeap, D3D12_HEAP_FLAG_NONE, &cb,
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&cam_cbv_));
-    std::fprintf(stderr, "Rstr2Core: created camera cbv\n");
+    rlogf("Rstr2Core: created camera cbv\n");
     if (FAILED(hr)) { error = "Rstr2: failed to create camera constant buffer."; return false; }
 
     return true;
@@ -529,7 +547,7 @@ bool Renderer::create_root_signatures(std::string& error) {
 }
 
 bool Renderer::create_pipeline(std::string& error) {
-    std::fprintf(stderr, "Rstr2Core: create_pipeline begin\n");
+    rlogf("Rstr2Core: create_pipeline begin\n");
     std::vector<D3D12_STATE_SUBOBJECT> subs;
     subs.reserve(7);
 
@@ -603,7 +621,7 @@ bool Renderer::create_pipeline(std::string& error) {
     so.pSubobjects = subs.data();
 
     HRESULT hr = device_->CreateStateObject(&so, IID_PPV_ARGS(&state_object_));
-    std::fprintf(stderr, "Rstr2Core: CreateStateObject returned 0x%08X\n",
+    rlogf("Rstr2Core: CreateStateObject returned 0x%08X\n",
                  static_cast<unsigned>(hr));
     if (FAILED(hr)) {
         error = "Rstr2: failed to create DXR state object (HRESULT 0x" +
