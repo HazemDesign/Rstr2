@@ -60,11 +60,15 @@ else()
 endif()
 
 # The .cso is loaded at runtime from the executable directory.
+#
+# NOTE: raytracing.hlsl must NOT be listed as a target source. Otherwise
+# MSBuild/Visual Studio compiles it as a shader with its default (non-DXR)
+# rules and fails on RaytracingAccelerationStructure. It is only a DEPENDS of
+# the custom command below; we remove it from the sources here.
 add_executable(Rstr2Core
     src/main.cpp
     src/shared_mem.cpp
-    src/renderer.cpp
-    ${SHADER_SRC})
+    src/renderer.cpp)
 
 set_target_properties(Rstr2Core PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>)
