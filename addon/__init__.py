@@ -347,7 +347,8 @@ class Rstr2Engine(RenderEngine):
                     self._reader = reader
                     self._core_msg = "frame map open"
                 else:
-                    self._core_msg = "frame map not open (core not alive?)"
+                    code = self._core.exit_code() if self._core else None
+                    self._core_msg = "frame map not open (core exited, code %s)" % str(code)
             except Exception as e:
                 self._core_msg = "frame open err: %s" % str(e)[:40]
 

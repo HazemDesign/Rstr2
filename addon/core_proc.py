@@ -89,6 +89,13 @@ class CoreProcess:
         return self._proc.poll() is None
 
     # ------------------------------------------------------------------
+    def exit_code(self):
+        """Return the child's exit code if it has terminated, else None."""
+        if self._proc is None:
+            return None
+        return self._proc.poll()
+
+    # ------------------------------------------------------------------
     def terminate(self):
         if self._proc is None:
             return
