@@ -8,7 +8,7 @@ set(SHADER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/shaders/raytracing.hlsl)
 set(CSO_PATH ${CMAKE_CURRENT_BINARY_DIR}/raytracing.cso)
 
 # Locate dxc (DirectX Shader Compiler). The Windows SDK ships it under a
-# versioned bin folder, so glob fortran... glob for it.
+# versioned bin folder, so glob for it.
 set(DXC_EXECUTABLE "")
 file(GLOB _dxc_list
     "C:/Program Files (x86)/Windows Kits/10/bin/*/x64/dxc.exe"
@@ -35,14 +35,14 @@ add_custom_command(
     COMMENT "Compiling raytracing.hlsl -> raytracing.cso (dxc)")
 
 # The .cso is loaded at runtime from the executable directory.
-set_target_properties(Rstr2Core PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>)
-
 add_executable(Rstr2Core
     src/main.cpp
     src/shared_mem.cpp
     src/renderer.cpp
     ${SHADER_SRC})
+
+set_target_properties(Rstr2Core PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>)
 
 # Compile the shader to raytracing.cso, then copy it next to the exe.
 add_custom_target(Rstr2Core_cso DEPENDS ${CSO_PATH})
