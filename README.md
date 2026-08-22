@@ -20,12 +20,20 @@ Blender (Python addon)                 Native core (C++/HLSL, built by CI)
 ## Phases
 
 - [x] **Phase 1** - Addon skeleton: registers "Rstr2" engine, animated test pattern
-      in viewport (`view_draw`) and F12 (`render`). Proves the post-bgl framebuffer path.
-- [ ] **Phase 2** - Interop: native exe initializes D3D12, ray-traces a hardcoded
-      triangle, ships pixels over shared memory; addon displays them.
-- [ ] **Phase 3** - Scene sync: meshes/camera/lights from depsgraph -> DXR accel structures.
+       in viewport (`view_draw`) and F12 (`render`). Proves the post-bgl framebuffer path.
+- [x] **Phase 2** - Interop: native exe initializes D3D12/DXR, ray-traces a hardcoded
+       triangle, ships RGBA32F pixels over shared memory (`Local\Rstr2Frame_v1`);
+       addon displays them. Built by GitHub Actions (no local VS).
+- [x] **Phase 3** - Scene sync: addon extracts world-space triangle soup + camera basis
+       from the depsgraph and publishes it over `Local\Rstr2Scene_v1`; the core polls
+       it, rebuilds BLAS/TLAS each update, and ray-traces the real geometry with the
+       supplied camera (falls back to the hardcoded triangle when no scene is sent).
 - [ ] **Phase 4** - Many lights + ReSTIR DI.
 - [ ] **Phase 5** - Temporal accumulation/denoise, indirect bounces.
+
+> Note: Phases 2-3 compile and pass the CI build/smoke. End-to-end GPU rendering
+> (actual DXR dispatch on an RTX 5050) is verified by running the addon locally with
+> the downloaded `bin/Rstr2Core.exe` artifact.
 
 ## Install the addon locally (Blender 5.2)
 
