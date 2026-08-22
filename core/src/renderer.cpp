@@ -232,10 +232,11 @@ bool Renderer::create_resources(std::string& error) {
     rlogf("Rstr2Core: create_resources begin\n");
 
     // Shader-visible CBV_SRV_UAV heap: [0]=TLAS SRV, [1]=Vertices SRV,
-    // [2]=Indices SRV, [3]=output UAV. (SRVs 0..2 are filled by build_scene_accel.)
+    // [2]=Indices SRV. (SRVs 0..2 are filled by build_scene_accel. The output
+    // UAV is bound as a root-descriptor UAV, not via this heap.)
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 4;
+    hd.NumDescriptors = 3;
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     rlogf("Rstr2Core: create_resources heap\n");
     hr = device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap_));
@@ -266,26 +267,10 @@ bool Renderer::create_resources(std::string& error) {
     rlogf("Rstr2Core: created readback buffer");
     if (FAILED(hr)) { error = "Rstr2: failed to create readback buffer."; return false; }
 
-    // Output UAV at heap index 3.
-    {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
-        uav.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-        uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        uav.Buffer.FirstElement = 0;
-        uav.Buffer.NumElements = static_cast<UINT>(width_ * height_);
-        uav.Buffer.StructureByteStride = 0;
-        __try {
-            CD3DX12_CPU_DESCRIPTOR_HANDLE h3(heap_->GetCPUDescriptorHandleForHeapStart());
-            h3.Offset(3, descriptor_inc_);
-            rlogf("Rstr2Core: create_resources uav");
-            device_->CreateUnorderedAccessView(output_.Get(), nullptr, &uav, h3);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            rlogf("Rstr2Core: EXCEPTION 0x%08X during UAV setup/call\n",
-                         (unsigned)GetExceptionCode());
-            return false;
-        }
-        rlogf("Rstr2Core: created uav");
-    }
+    // Output UAV: bound as a root-descriptor UAV (SetComputeRootUnorderedAccessView)
+    // in render_frame, so we deliberately do NOT create a view in this shader-
+    // visible heap. (Creating a UAV view into a shader-visible heap triggered a
+    // driver stack overflow on the test GPU; the root-descriptor path avoids it.)
 
     // Camera constant buffer (UPLOAD, 64 bytes).
     D3D12_RESOURCE_DESC cb = {};
@@ -486,6 +471,7 @@ bool Renderer::build_scene_accel(std::string& error) {
     wait_for_gpu();
     rlogf("Rstr2Core: accel built\n");
 
+    rlogf("Rstr2Core: accel srv begin\n");
     // ---- TLAS SRV (heap[0]), Vertices SRV (heap[1]), Indices SRV (heap[2]) ----
     CD3DX12_CPU_DESCRIPTOR_HANDLE h0(heap_->GetCPUDescriptorHandleForHeapStart());
 
@@ -517,6 +503,7 @@ bool Renderer::build_scene_accel(std::string& error) {
     CD3DX12_CPU_DESCRIPTOR_HANDLE h2(h1);
     h2.Offset(1, descriptor_inc_);
     device_->CreateShaderResourceView(index_buf_.Get(), &isrv, h2);
+    rlogf("Rstr2Core: accel srv done\n");
 
     return update_camera_cbv(error);
 }
@@ -548,24 +535,20 @@ bool Renderer::create_root_signatures(std::string& error) {
     HRESULT hr;
 
     // Global root signature:
-    //   param 0: descriptor table { SRV t0,t1,t2 (TLAS, Vertices, Indices), UAV u0 }
+    //   param 0: descriptor table { SRV t0,t1,t2 (TLAS, Vertices, Indices) }
     //   param 1: CBV b0 (camera)
-    D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+    //   param 2: UAV u0 (output) bound as a root descriptor (no heap entry)
+    D3D12_DESCRIPTOR_RANGE ranges[1] = {};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     ranges[0].NumDescriptors = 3;
     ranges[0].BaseShaderRegister = 0;
     ranges[0].RegisterSpace = 0;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
-    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 1;
-    ranges[1].BaseShaderRegister = 0;
-    ranges[1].RegisterSpace = 0;
-    ranges[1].OffsetInDescriptorsFromTableStart = 3;
 
-    D3D12_ROOT_PARAMETER params[2] = {};
+    D3D12_ROOT_PARAMETER params[3] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    params[0].DescriptorTable.NumDescriptorRanges = 2;
+    params[0].DescriptorTable.NumDescriptorRanges = 1;
     params[0].DescriptorTable.pDescriptorRanges = ranges;
 
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -573,8 +556,13 @@ bool Renderer::create_root_signatures(std::string& error) {
     params[1].Descriptor.ShaderRegister = 0;
     params[1].Descriptor.RegisterSpace = 0;
 
+    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[2].Descriptor.ShaderRegister = 0;
+    params[2].Descriptor.RegisterSpace = 0;
+
     D3D12_ROOT_SIGNATURE_DESC rs = {};
-    rs.NumParameters = 2;
+    rs.NumParameters = 3;
     rs.pParameters = params;
     rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
 
@@ -727,6 +715,7 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     cmd_list_->SetComputeRootSignature(global_rs_.Get());
     cmd_list_->SetComputeRootDescriptorTable(0, heap_->GetGPUDescriptorHandleForHeapStart());
     cmd_list_->SetComputeRootConstantBufferView(1, cam_cbv_->GetGPUVirtualAddress());
+    cmd_list_->SetComputeRootUnorderedAccessView(2, output_->GetGPUVirtualAddress());
 
     D3D12_DISPATCH_RAYS_DESC dr = {};
     dr.RayGenerationShaderRecord.StartAddress = sbt_->GetGPUVirtualAddress() + sbt_raygen_offset_;
