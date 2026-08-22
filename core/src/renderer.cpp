@@ -413,7 +413,9 @@ bool Renderer::create_root_signatures(std::string& error) {
     lparam.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     lparam.Descriptor.ShaderRegister = 0;
     lparam.Descriptor.RegisterSpace = 1;
-    lparam.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_NONE;
+    // NOTE: D3D12_ROOT_DESCRIPTOR.Flags does not exist in all Windows SDK
+    // versions (it was added later, alongside D3D12_ROOT_DESCRIPTOR_FLAGS).
+    // It defaults to 0, so we omit it for broad SDK compatibility.
 
     D3D12_ROOT_SIGNATURE_DESC lrs = {};
     lrs.NumParameters = 1;
@@ -473,7 +475,7 @@ bool Renderer::create_pipeline(std::string& error) {
 
     // 4. Global root signature.
     D3D12_GLOBAL_ROOT_SIGNATURE global_rs = {};
-    global_rs.pRootSignature = global_rs_.Get();
+    global_rs.pGlobalRootSignature = global_rs_.Get();
     {
         D3D12_STATE_SUBOBJECT s = {};
         s.Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;
@@ -483,7 +485,7 @@ bool Renderer::create_pipeline(std::string& error) {
 
     // 5. Local root signature (kept referenced for the association below).
     D3D12_LOCAL_ROOT_SIGNATURE local_rs = {};
-    local_rs.pRootSignature = local_rs_.Get();
+    local_rs.pLocalRootSignature = local_rs_.Get();
     D3D12_STATE_SUBOBJECT local_rs_sub = {};
     local_rs_sub.Type = D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE;
     local_rs_sub.pDesc = &local_rs;
