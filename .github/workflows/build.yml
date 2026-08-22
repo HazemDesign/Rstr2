@@ -37,8 +37,16 @@ jobs:
             $dxc = Join-Path $PWD "dxc_tool\bin\x64\dxc.exe"
             if (-not (Test-Path $dxc)) { $dxc = (Get-ChildItem dxc_tool -Recurse -Filter dxc.exe | Select-Object -First 1).FullName }
             if (-not (Test-Path $dxc)) { throw "dxc.exe not found after extraction" }
+            & $dxc --version
+            $shader = Join-Path $PWD "core\shaders\raytracing.hlsl"
+            $csoOut = Join-Path $PWD "core\shaders\raytracing.cso"
+            Write-Host "Compiling shader with pinned dxc..."
+            & $dxc -T lib_6_5 -HV 2021 -Fo $csoOut $shader
+            if ($LASTEXITCODE -ne 0) { throw "dxc failed to compile raytracing.hlsl (exit $LASTEXITCODE)" }
+            if (-not (Test-Path $csoOut)) { throw "raytracing.cso was not produced" }
             "DXC_EXECUTABLE=$dxc" >> $env:GITHUB_ENV
-            "Using dxc: $dxc"
+            "RAYTRACING_CSO=$csoOut" >> $env:GITHUB_ENV
+            "Using dxc: $dxc ; cso: $csoOut"
           } catch {
             Write-Error "dxc fetch failed: $($_.Exception.Message)"
             exit 1

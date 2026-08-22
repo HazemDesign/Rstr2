@@ -33,12 +33,31 @@ if(NOT DXC_EXECUTABLE)
         "compiled to raytracing.cso.")
 endif()
 
-message(STATUS "Rstr2Core: using dxc at ${DXC_EXECUTABLE}")
-add_custom_command(
-    OUTPUT ${CSO_PATH}
-    COMMAND ${DXC_EXECUTABLE} -T lib_6_5 -HV 2021 -Fo ${CSO_PATH} ${SHADER_SRC}
-    DEPENDS ${SHADER_SRC}
-    COMMENT "Compiling raytracing.hlsl -> raytracing.cso (dxc)")
+# If a prebuilt .cso was supplied (RAYTRACING_CSO env, set by CI's dxc fetch
+# step where the compiler DLLs are guaranteed adjacent and verified), copy it.
+# Otherwise compile raytracing.hlsl with dxc.
+if(DEFINED ENV{RAYTRACING_CSO} AND NOT "$ENV{RAYTRACING_CSO}" STREQUAL "")
+    set(RAYTRACING_CSO "$ENV{RAYTRACING_CSO}")
+    message(STATUS "Rstr2Core: using prebuilt cso at ${RAYTRACING_CSO}")
+    add_custom_command(
+        OUTPUT ${CSO_PATH}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RAYTRACING_CSO}" "${CSO_PATH}"
+        DEPENDS ${RAYTRACING_CSO}
+        COMMENT "Copying prebuilt raytracing.cso")
+else()
+    if(NOT DXC_EXECUTABLE)
+        message(FATAL_ERROR
+            "Rstr2Core: dxc (DirectX Shader Compiler) not found. Install the Windows "
+            "SDK (10.x) or add dxc.exe to PATH so shaders/raytracing.hlsl can be "
+            "compiled to raytracing.cso.")
+    endif()
+    message(STATUS "Rstr2Core: using dxc at ${DXC_EXECUTABLE}")
+    add_custom_command(
+        OUTPUT ${CSO_PATH}
+        COMMAND ${DXC_EXECUTABLE} -T lib_6_5 -HV 2021 -Fo ${CSO_PATH} ${SHADER_SRC}
+        DEPENDS ${SHADER_SRC}
+        COMMENT "Compiling raytracing.hlsl -> raytracing.cso (dxc)")
+endif()
 
 # The .cso is loaded at runtime from the executable directory.
 add_executable(Rstr2Core
