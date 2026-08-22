@@ -66,7 +66,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12CommandQueue>   queue_;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> cmd_list_;
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> heap_;
     Microsoft::WRL::ComPtr<ID3D12Resource>       output_;
     Microsoft::WRL::ComPtr<ID3D12Resource>       readback_;
     Microsoft::WRL::ComPtr<ID3D12Resource>       cam_cbv_;
@@ -84,7 +83,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Fence>          fence_;
     HANDLE fence_event_ = nullptr;
 
-    UINT descriptor_inc_ = 0;
     size_t sbt_raygen_offset_ = 0;
     size_t sbt_miss_offset_ = 0;
     size_t sbt_hit_offset_ = 0;
