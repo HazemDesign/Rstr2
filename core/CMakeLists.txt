@@ -7,14 +7,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SHADER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/shaders/raytracing.hlsl)
 set(CSO_PATH ${CMAKE_CURRENT_BINARY_DIR}/raytracing.cso)
 
-# Locate dxc (DirectX Shader Compiler). The Windows SDK ships it under a
-# versioned bin folder, so glob for it.
-set(DXC_EXECUTABLE "")
-file(GLOB _dxc_list
-    "C:/Program Files (x86)/Windows Kits/10/bin/*/x64/dxc.exe"
-    "C:/Program Files/Windows Kits/10/bin/*/x64/dxc.exe")
-if(_dxc_list)
-    list(GET _dxc_list 0 DXC_EXECUTABLE)
+# Locate dxc (DirectX Shader Compiler). Prefer an explicitly provided path
+# (DXC_EXECUTABLE env var, set by CI to a pinned DirectXShaderCompiler build
+# because the Windows SDK dxc on some runners does not expose DXR builtins),
+# then fall back to a Windows SDK glob and finally a PATH search.
+if(DEFINED ENV{DXC_EXECUTABLE} AND NOT "$ENV{DXC_EXECUTABLE}" STREQUAL "")
+    set(DXC_EXECUTABLE "$ENV{DXC_EXECUTABLE}")
+endif()
+if(NOT DXC_EXECUTABLE)
+    file(GLOB _dxc_list
+        "C:/Program Files (x86)/Windows Kits/10/bin/*/x64/dxc.exe"
+        "C:/Program Files/Windows Kits/10/bin/*/x64/dxc.exe")
+    if(_dxc_list)
+        list(GET _dxc_list 0 DXC_EXECUTABLE)
+    endif()
 endif()
 if(NOT DXC_EXECUTABLE)
     find_program(DXC_EXECUTABLE dxc)
