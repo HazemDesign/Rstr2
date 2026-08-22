@@ -33,15 +33,14 @@ const D3D12_HEAP_PROPERTIES kUploadHeap = []() {
     return h;
 }();
 
-// Camera constant buffer layout must match cbuffer Camera in raytracing.hlsl:
-// each float3 is padded to 16 bytes, the trailing float packs after forward.
+// Camera constant buffer layout must match cbuffer Camera in raytracing.hlsl.
+// Each float3 takes a 16-byte (vec4) register; the trailing scalar packs into
+// the 4th float of the forward register (offset 60). Total: 4 registers = 64B.
 struct CameraCB {
-    float origin[4];
-    float right[4];
-    float up[4];
-    float forward[4];
-    float tanHalfFovY;
-    float pad[3];
+    float origin[4];   // xyz used
+    float right[4];    // xyz used
+    float up[4];       // xyz used
+    float forward[4];  // xyz used; forward[3] = camTanHalfFovY
 };
 static_assert(sizeof(CameraCB) == 64, "CameraCB must be 64 bytes");
 
@@ -457,7 +456,7 @@ bool Renderer::update_camera_cbv(std::string& error) {
     std::memcpy(cb.right, scene_.cam_right, 3 * sizeof(float));
     std::memcpy(cb.up, scene_.cam_up, 3 * sizeof(float));
     std::memcpy(cb.forward, scene_.cam_forward, 3 * sizeof(float));
-    cb.tanHalfFovY = scene_.cam_tan_half_fov_y;
+    cb.forward[3] = scene_.cam_tan_half_fov_y;
     void* mapped = nullptr;
     cam_cbv_->Map(0, nullptr, &mapped);
     std::memcpy(mapped, &cb, sizeof(cb));
