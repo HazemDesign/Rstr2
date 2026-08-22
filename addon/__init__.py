@@ -59,7 +59,7 @@ def _resize_nearest(arr, width, height):
     return arr[np.ix_(ys, xs)]
 
 
-def _extract_scene(depsgraph, context):
+def _extract_scene(depsgraph):
     """Build (vertices, indices, camera) for the native core.
 
     vertices : (n, 3) float32, world-space triangle-soup vertices
@@ -73,7 +73,7 @@ def _extract_scene(depsgraph, context):
     import math
 
     # --- Camera basis from the active camera (or a sensible default) -----
-    camera = context.scene.camera
+    camera = depsgraph.scene.camera
     if camera is None:
         cam = {
             "origin": (0.0, 0.6, -2.2),
@@ -144,7 +144,11 @@ class Rstr2Engine(RenderEngine):
     bl_label = "Rstr2"
     bl_use_postprocess = True
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
+        # Blender instantiates RenderEngine subclasses with an extra argument
+        # (the engine type); forward it to the base class so __init__ never
+        # throws during engine creation.
+        super().__init__(*args, **kwargs)
         self.frame = 0
 
         # --- Phase 2/3: native core bridge state -----------------------
@@ -155,6 +159,7 @@ class Rstr2Engine(RenderEngine):
         self._scene_writer = None  # SceneWriter instance (addon -> core)
         self._last_frame_index = None
         self._cached_pixels = None
+        self._dbg = ""             # short status shown in the viewport
 
     # ------------------------------------------------------------------
     # Final render (F12 / CLI)
@@ -168,13 +173,14 @@ class Rstr2Engine(RenderEngine):
         # Try a ready core frame; fall back to the test pattern unchanged.
         pixels = None
         try:
-            self._sync_scene(depsgraph, context)
+            self._sync_scene(depsgraph)
             if self._ensure_core():
                 frame = self._reader.read_frame()
                 if frame is not None:
                     _, pf = frame
                     pixels = _resize_nearest(pf, width, height)
-        except Exception:
+        except Exception as e:
+            self._dbg = "render err: %s" % str(e)[:60]
             pixels = None
 
         if pixels is None:
@@ -195,9 +201,9 @@ class Rstr2Engine(RenderEngine):
     def view_update(self, context, depsgraph):
         # Phase 3: push the current scene (meshes + camera) to the native core.
         try:
-            self._sync_scene(depsgraph, context)
-        except Exception:
-            pass
+            self._sync_scene(depsgraph)
+        except Exception as e:
+            self._dbg = "sync err: %s" % str(e)[:60]
         # Keep redrawing so the live core feed updates.
         self.tag_redraw()
 
@@ -226,14 +232,15 @@ class Rstr2Engine(RenderEngine):
                         self._cached_pixels = pf
                     pixels = self._cached_pixels
                     live = pixels is not None
-        except Exception:
+        except Exception as e:
+            self._dbg = "draw err: %s" % str(e)[:60]
             live = False
 
         if live:
-            status = "Rstr2: live core"
+            status = "Rstr2: live core | " + self._dbg
         else:
             pixels = _make_test_pattern(width, height)
-            status = "Rstr2: waiting (test pattern)"
+            status = "Rstr2: waiting | " + self._dbg
 
         self.update_stats("", status)
 
@@ -275,18 +282,21 @@ class Rstr2Engine(RenderEngine):
                 self._scene_writer = None
         return self._scene_writer is not None
 
-    def _sync_scene(self, depsgraph, context):
+    def _sync_scene(self, depsgraph):
         """Extract meshes + camera from the depsgraph and publish to the core."""
-        scene = _extract_scene(depsgraph, context)
+        scene = _extract_scene(depsgraph)
         if scene is None:
+            self._dbg = "no mesh"
             return
         if not self._ensure_scene_writer():
+            self._dbg = "scene map n/a"
             return
         try:
             vertices, indices, camera = scene
-            self._scene_writer.write(vertices, indices, camera)
-        except Exception:
-            pass
+            ok = self._scene_writer.write(vertices, indices, camera)
+            self._dbg = ("scene %d v / %d i" % (vertices.shape[0], indices.shape[0])) if ok else "scene write fail"
+        except Exception as e:
+            self._dbg = "scene err: %s" % str(e)[:60]
 
     # ------------------------------------------------------------------
     # Phase 2 core bridge helpers
