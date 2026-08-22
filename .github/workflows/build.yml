@@ -1,0 +1,26 @@
+name: build-core
+
+on:
+  push:
+    paths: ["core/**", ".github/workflows/build.yml"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S core -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Smoke run
+        run: ./build/Release/Rstr2Core.exe --ci
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Rstr2Core-win64
+          path: build/Release/Rstr2Core.exe
