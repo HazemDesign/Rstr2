@@ -252,8 +252,8 @@ class Rstr2Engine(RenderEngine):
         from gpu.types import GPUVertBuf, GPUVertFormat, GPUBatch
 
         vformat = GPUVertFormat()
-        pos_id = vformat.attr_add(id="pos", comp_type="F32", len=2)
-        uv_id = vformat.attr_add(id="texCoord", comp_type="F32", len=2)
+        pos_id = vformat.attr_add(id="pos", comp_type="F32", len=2, fetch_mode="FLOAT")
+        uv_id = vformat.attr_add(id="texCoord", comp_type="F32", len=2, fetch_mode="FLOAT")
         vbo = GPUVertBuf(vformat, 4)
         vbo.attr_fill(id=pos_id, data=[(0, 0), (width, 0), (width, height), (0, height)])
         vbo.attr_fill(id=uv_id, data=[(0, 0), (1, 0), (1, 1), (0, 1)])
