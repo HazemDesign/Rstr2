@@ -631,7 +631,9 @@ bool Renderer::create_sbt(std::string& error) {
     };
     copy_id(mapped + sbt_raygen_offset_, L"raygenMain");
     copy_id(mapped + sbt_miss_offset_, L"missMain");
-    copy_id(mapped + sbt_hit_offset_, L"hitMain");
+    // The hit-group TABLE must reference the hit-group export ("HitGroup"),
+    // not the closest-hit shader ("hitMain") it imports.
+    copy_id(mapped + sbt_hit_offset_, L"HitGroup");
 
     sbt_->Unmap(0, nullptr);
     return true;

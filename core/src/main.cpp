@@ -109,6 +109,8 @@ int main(int argc, char** argv) {
         if (scene.is_open()) {
             rstr2::SceneData sd;
             if (scene.read_scene(sd)) {
+                std::fprintf(stderr, "Rstr2Core: scene received v=%u i=%u\n",
+                             (unsigned)sd.vertices.size() / 3u, (unsigned)sd.indices.size());
                 std::string se;
                 if (!renderer.set_scene(sd, se)) {
                     std::fprintf(stderr, "Rstr2Core: set_scene failed: %s\n", se.c_str());
