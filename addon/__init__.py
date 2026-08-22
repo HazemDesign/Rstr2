@@ -154,6 +154,7 @@ class Rstr2Engine(RenderEngine):
         # --- Phase 2/3: native core bridge state -----------------------
         self._core_started = False
         self._core_ok = False
+        self._core_msg = ""
         self._core = None          # CoreProcess instance
         self._reader = None        # CoreFrameReader instance
         self._scene_writer = None  # SceneWriter instance (addon -> core)
@@ -240,7 +241,7 @@ class Rstr2Engine(RenderEngine):
             status = "Rstr2: live core | " + self._dbg
         else:
             pixels = _make_test_pattern(width, height)
-            status = "Rstr2: waiting | " + self._dbg
+            status = "Rstr2: waiting | " + self._core_msg + " | " + self._dbg
 
         self.update_stats("", status)
 
@@ -317,14 +318,21 @@ class Rstr2Engine(RenderEngine):
                 from . import core_proc
 
                 exe = core_proc.core_exe_path()
+                cso = core_proc.core_cso_path()
                 if exe is None:
                     self._core_ok = False
+                    self._core_msg = "Rstr2Core.exe missing in bin/"
+                elif cso is None:
+                    self._core_ok = False
+                    self._core_msg = "raytracing.cso missing in bin/"
                 else:
                     self._core = core_proc.CoreProcess()
                     self._core.launch()
                     self._core_ok = True
-            except Exception:
+                    self._core_msg = "core launched"
+            except Exception as e:
                 self._core_ok = False
+                self._core_msg = "core launch err: %s" % str(e)[:60]
 
         if not self._core_ok:
             return False

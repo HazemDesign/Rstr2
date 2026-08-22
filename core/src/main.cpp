@@ -42,6 +42,13 @@ void print_help() {
 } // namespace
 
 int main(int argc, char** argv) {
+    // Diagnostics: the addon launches us windowless, so route everything to
+    // stderr and keep it unbuffered. core_proc.py redirects stderr to
+    // bin/Rstr2Core.log so the user can read why we failed to start.
+    setvbuf(stderr, nullptr, _IONBF, 0);
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    std::fprintf(stderr, "Rstr2Core: process starting\n");
+
     int width = 960;
     int height = 540;
     std::wstring shm_name = L"Local\\Rstr2Frame_v1";

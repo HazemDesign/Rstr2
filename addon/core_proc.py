@@ -25,17 +25,31 @@ def core_exe_path():
     return None
 
 
+def core_cso_path():
+    """Return the path to raytracing.cso next to Rstr2Core.exe, or None."""
+    try:
+        p = Path(__file__).resolve().parents[1] / "bin" / "raytracing.cso"
+        if p.is_file():
+            return p
+    except Exception:
+        pass
+    return None
+
+
 class CoreProcess:
     """Manages the lifetime of a single Rstr2Core.exe instance."""
 
     def __init__(self):
         self._proc = None
+        self._log = None
 
     # ------------------------------------------------------------------
     def launch(self, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT):
         """Spawn the core. No-op (returns False) if already running.
 
-        Returns True if a new process was started, False otherwise.
+        Returns True if a new process was started, False otherwise. The
+        child's stdout/stderr are redirected to bin/Rstr2Core.log so launch
+        and runtime diagnostics are visible even though it runs windowless.
         """
         if self.poll_alive():
             return False
@@ -44,13 +58,27 @@ class CoreProcess:
         if exe is None:
             return False
 
+        log_path = exe.parent / "Rstr2Core.log"
+        try:
+            self._log = open(str(log_path), "ab", buffering=0)
+        except Exception:
+            self._log = None
+
         try:
             self._proc = subprocess.Popen(
                 [str(exe), "--width", str(width), "--height", str(height)],
                 creationflags=CREATE_NO_WINDOW,
+                stdout=self._log,
+                stderr=self._log,
             )
             return True
         except Exception:
+            if self._log is not None:
+                try:
+                    self._log.close()
+                except Exception:
+                    pass
+                self._log = None
             self._proc = None
             return False
 
@@ -77,3 +105,9 @@ class CoreProcess:
                 pass
         finally:
             self._proc = None
+            if self._log is not None:
+                try:
+                    self._log.close()
+                except Exception:
+                    pass
+                self._log = None
