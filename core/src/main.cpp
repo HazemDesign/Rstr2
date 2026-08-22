@@ -71,7 +71,7 @@ struct WorkerArgs {
 
 unsigned __stdcall worker_main(void* param) {
     WorkerArgs* a = static_cast<WorkerArgs*>(param);
-    rlogf("Rstr2Core: worker thread started (512MB stack)\n");
+    rlogf("Rstr2Core: worker thread started (3GB stack)\n");
 
     const size_t pixel_bytes = static_cast<size_t>(a->width) * static_cast<size_t>(a->height) * 16u;
     const size_t shm_size = 256 + pixel_bytes;

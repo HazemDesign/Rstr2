@@ -267,17 +267,25 @@ bool Renderer::create_resources(std::string& error) {
     if (FAILED(hr)) { error = "Rstr2: failed to create readback buffer."; return false; }
 
     // Output UAV at heap index 3.
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
-    uav.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-    uav.Buffer.FirstElement = 0;
-    uav.Buffer.NumElements = static_cast<UINT>(width_ * height_);
-    uav.Buffer.StructureByteStride = 0;
-    CD3DX12_CPU_DESCRIPTOR_HANDLE h3(heap_->GetCPUDescriptorHandleForHeapStart());
-    h3.Offset(3, descriptor_inc_);
-    rlogf("Rstr2Core: create_resources uav");
-    device_->CreateUnorderedAccessView(output_.Get(), nullptr, &uav, h3);
-    rlogf("Rstr2Core: created uav");
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
+        uav.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uav.Buffer.FirstElement = 0;
+        uav.Buffer.NumElements = static_cast<UINT>(width_ * height_);
+        uav.Buffer.StructureByteStride = 0;
+        __try {
+            CD3DX12_CPU_DESCRIPTOR_HANDLE h3(heap_->GetCPUDescriptorHandleForHeapStart());
+            h3.Offset(3, descriptor_inc_);
+            rlogf("Rstr2Core: create_resources uav");
+            device_->CreateUnorderedAccessView(output_.Get(), nullptr, &uav, h3);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            rlogf("Rstr2Core: EXCEPTION 0x%08X during UAV setup/call\n",
+                         (unsigned)GetExceptionCode());
+            return false;
+        }
+        rlogf("Rstr2Core: created uav");
+    }
 
     // Camera constant buffer (UPLOAD, 64 bytes).
     D3D12_RESOURCE_DESC cb = {};
