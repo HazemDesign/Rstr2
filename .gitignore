@@ -5,3 +5,7 @@ build/
 *.user
 core/src/raytracing_cso.h
 core/build/
+
+# Downloaded native-core artifact (from CI), not committed
+bin/
+
