@@ -83,15 +83,11 @@ SceneData make_default_scene() {
 }
 
 // ----------------------------------------------------------------------
-// Debug layer / info-queue capture (enabled via RSTR2_DEBUG env var).
-// Without the Windows "Graphics Tools" feature the debug layer is absent
-// (D3D12GetDebugInterface returns DXGI_ERROR_SDK_COMPONENT_MISSING); we then
-// log how to install it. The info queue lets us print the *precise* D3D12
-// validation error instead of a bare HRESULT.
+// Debug layer enable (RSTR2_DEBUG env var). Activating the D3D12 debug layer
+// turns on validation; under PIX (or a debugger) the precise error is shown.
+// Without the Windows "Graphics Tools" feature D3D12GetDebugInterface returns
+// DXGI_ERROR_SDK_COMPONENT_MISSING - we then log how to install it.
 // ----------------------------------------------------------------------
-static bool g_debug_enabled = false;
-static Microsoft::WRL::ComPtr<ID3D12InfoQueue> g_info_queue;
-
 static void enable_d3d12_debug_layer() {
     Microsoft::WRL::ComPtr<ID3D12Debug> dbg;
     HRESULT hr = D3D12GetDebugInterface(IID_PPV_ARGS(&dbg));
@@ -102,36 +98,7 @@ static void enable_d3d12_debug_layer() {
         return;
     }
     dbg->EnableDebugLayer();
-    g_debug_enabled = true;
     rlogf("Rstr2Core: D3D12 debug layer ENABLED (RSTR2_DEBUG set)");
-}
-
-static void setup_info_queue(ID3D12Device5* device) {
-    if (!g_debug_enabled) return;
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&g_info_queue)))) {
-        rlogf("Rstr2Core: failed to query ID3D12InfoQueue");
-        return;
-    }
-    g_info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE);
-    g_info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE);
-    g_info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, FALSE);
-    rlogf("Rstr2Core: D3D12 info queue active");
-}
-
-static void drain_info_queue() {
-    if (!g_info_queue) return;
-    ID3D12InfoQueue* iq = g_info_queue.Get();
-    const SIZE_T n = iq->GetNumMessages();
-    for (SIZE_T i = 0; i < n; ++i) {
-        SIZE_T len = 0;
-        if (FAILED(iq->GetMessage(i, nullptr, &len)) || len == 0) continue;
-        std::vector<uint8_t> buf(len);
-        D3D12_MESSAGE* m = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
-        if (SUCCEEDED(iq->GetMessage(i, m, &len)) && m->pDescription) {
-            rlogf("D3D12[%d/%u]: %s", (int)m->Severity, (unsigned)m->ID, m->pDescription);
-        }
-    }
-    iq->ClearStoredMessages();
 }
 
 // Create the TLAS SRV inside a shader-visible heap. Wrapped in SEH so a driver
@@ -140,7 +107,7 @@ static void drain_info_queue() {
 static HRESULT create_tlas_srv(ID3D12Device5* device,
                                ID3D12DescriptorHeap* heap,
                                ID3D12Resource* tlas,
-                               std::string& err) {
+                               char* errbuf, size_t errlen) {
     D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
     srv.Format = DXGI_FORMAT_UNKNOWN;
     srv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
@@ -148,12 +115,12 @@ static HRESULT create_tlas_srv(ID3D12Device5* device,
     srv.RaytracingAccelerationStructure.Location = tlas->GetGPUVirtualAddress();
     D3D12_CPU_DESCRIPTOR_HANDLE h0 = heap->GetCPUDescriptorHandleForHeapStart();
     __try {
-        return device->CreateShaderResourceView(nullptr, &srv, &h0);
+        return device->CreateShaderResourceView(nullptr, &srv, h0);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        char codebuf[32];
-        sprintf_s(codebuf, sizeof(codebuf), "0x%08X", (unsigned)GetExceptionCode());
-        err = std::string("CreateShaderResourceView raised SEH exception ") + codebuf +
-              " (likely driver stack overflow / Blackwell quirk)";
+        sprintf_s(errbuf, errlen,
+                  "CreateShaderResourceView raised SEH exception 0x%08X "
+                  "(likely driver stack overflow / Blackwell quirk)",
+                  (unsigned)GetExceptionCode());
         return E_FAIL;
     }
 }
@@ -161,14 +128,13 @@ static HRESULT create_tlas_srv(ID3D12Device5* device,
 // DispatchRays wrapped in SEH for the same reason as create_tlas_srv.
 static HRESULT dispatch_rays_safe(ID3D12GraphicsCommandList4* cmd,
                                  const D3D12_DISPATCH_RAYS_DESC* dr,
-                                 std::string& err) {
+                                 char* errbuf, size_t errlen) {
     __try {
         cmd->DispatchRays(dr);
         return S_OK;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        char codebuf[32];
-        sprintf_s(codebuf, sizeof(codebuf), "0x%08X", (unsigned)GetExceptionCode());
-        err = std::string("DispatchRays raised SEH exception ") + codebuf;
+        sprintf_s(errbuf, errlen, "DispatchRays raised SEH exception 0x%08X",
+                  (unsigned)GetExceptionCode());
         return E_FAIL;
     }
 }
@@ -211,7 +177,6 @@ bool Renderer::init(int width, int height, std::string& error) {
     rlogf("Rstr2Core: init sbt ok\n");
 
     rlogf("Rstr2Core: init complete\n");
-    drain_info_queue();
     return true;
 }
 
@@ -298,8 +263,6 @@ bool Renderer::init_dxr(std::string& error) {
         error = "Rstr2: no D3D12-capable GPU adapter found (or D3D12CreateDevice failed).";
         return false;
     }
-
-    setup_info_queue(device_.Get());
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 opts5 = {};
     hr = device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &opts5, sizeof(opts5));
@@ -583,16 +546,14 @@ bool Renderer::build_scene_accel(std::string& error) {
     // on the test GPU, we will see a crash here; with the 3 GB worker stack it
     // should be fine.
     rlogf("Rstr2Core: accel srv begin\n");
-    std::string srv_err;
-    HRESULT srv_hr = create_tlas_srv(device_.Get(), heap_.Get(), tlas_.Get(), srv_err);
+    char srv_err[256];
+    HRESULT srv_hr = create_tlas_srv(device_.Get(), heap_.Get(), tlas_.Get(), srv_err, sizeof(srv_err));
     if (FAILED(srv_hr)) {
-        error = "Rstr2: failed to create TLAS SRV: " + srv_err;
+        error = std::string("Rstr2: failed to create TLAS SRV: ") + srv_err;
         rlogf("Rstr2Core: %s (hr=0x%08X)\n", error.c_str(), (unsigned)srv_hr);
-        drain_info_queue();
         return false;
     }
     rlogf("Rstr2Core: accel srv done\n");
-    drain_info_queue();
 
     return update_camera_cbv(error);
 }
@@ -774,7 +735,6 @@ bool Renderer::create_pipeline(std::string& error) {
     HRESULT hr = device_->CreateStateObject(&so, IID_PPV_ARGS(&state_object_));
     rlogf("Rstr2Core: CreateStateObject returned 0x%08X\n",
                  static_cast<unsigned>(hr));
-    drain_info_queue();
     if (FAILED(hr)) {
         error = "Rstr2: failed to create DXR state object (HRESULT 0x" +
                 std::to_string(static_cast<unsigned>(hr)) + ").";
@@ -852,11 +812,10 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     dr.Width = static_cast<UINT>(width_);
     dr.Height = static_cast<UINT>(height_);
     dr.Depth = 1;
-    std::string dr_err;
-    if (FAILED(dispatch_rays_safe(cmd_list_.Get(), &dr, dr_err))) {
-        error = "Rstr2: " + dr_err;
+    char dr_err[256];
+    if (FAILED(dispatch_rays_safe(cmd_list_.Get(), &dr, dr_err, sizeof(dr_err)))) {
+        error = std::string("Rstr2: ") + dr_err;
         rlogf("Rstr2Core: %s\n", error.c_str());
-        drain_info_queue();
         return false;
     }
 
