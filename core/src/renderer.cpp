@@ -51,7 +51,10 @@ HRESULT serialize_root_signature(const D3D12_ROOT_SIGNATURE_DESC& desc,
     return D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, blob, error);
 }
 
-// Timestamped diagnostic line to stderr (redirected to bin/Rstr2Core.log).
+// Timestamped diagnostic line to stderr (redirected to bin/Rstr2Core.log in
+// production) AND mirrored to Rstr2Core.log in the working directory so the
+// messages survive when stderr is captured by a launcher (e.g. PIX's GPU
+// capture engine), which is how we read the precise D3D12 validation errors.
 static void rlogf(const char* fmt, ...) {
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -63,6 +66,12 @@ static void rlogf(const char* fmt, ...) {
     std::fprintf(stderr, "[%02u:%02u:%02u.%03u] %s\n",
                  st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
     std::fflush(stderr);
+    static std::FILE* g_log = std::fopen("Rstr2Core.log", "a");
+    if (g_log) {
+        std::fprintf(g_log, "[%02u:%02u:%02u.%03u] %s\n",
+                     st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+        std::fflush(g_log);
+    }
 }
 
 // Default Phase 2 fallback scene: a single triangle + the matching camera.
