@@ -115,7 +115,8 @@ static HRESULT create_tlas_srv(ID3D12Device5* device,
     srv.RaytracingAccelerationStructure.Location = tlas->GetGPUVirtualAddress();
     D3D12_CPU_DESCRIPTOR_HANDLE h0 = heap->GetCPUDescriptorHandleForHeapStart();
     __try {
-        return device->CreateShaderResourceView(nullptr, &srv, h0);
+        device->CreateShaderResourceView(nullptr, &srv, h0);
+        return S_OK;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         sprintf_s(errbuf, errlen,
                   "CreateShaderResourceView raised SEH exception 0x%08X "
