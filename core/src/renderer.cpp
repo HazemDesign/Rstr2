@@ -576,7 +576,7 @@ bool Renderer::create_root_signatures(std::string& error) {
 bool Renderer::create_pipeline(std::string& error) {
     rlogf("Rstr2Core: create_pipeline begin\n");
     std::vector<D3D12_STATE_SUBOBJECT> subs;
-    subs.reserve(7);
+    subs.reserve(8);
 
     D3D12_STATE_OBJECT_CONFIG config = {};
     config.Flags = D3D12_STATE_OBJECT_FLAG_NONE;
@@ -606,6 +606,7 @@ bool Renderer::create_pipeline(std::string& error) {
     D3D12_RAYTRACING_SHADER_CONFIG shader_config = {};
     shader_config.MaxPayloadSizeInBytes = 16;
     shader_config.MaxAttributeSizeInBytes = 8;
+    const size_t shader_config_idx = subs.size();
     {
         D3D12_STATE_SUBOBJECT s = {};
         s.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG;
@@ -639,6 +640,22 @@ bool Renderer::create_pipeline(std::string& error) {
         D3D12_STATE_SUBOBJECT s = {};
         s.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;
         s.pDesc = &pipeline;
+        subs.push_back(s);
+    }
+
+    // DXR requires the shader config to be explicitly associated with the
+    // shaders that use it. Without this, CreateStateObject fails with
+    // E_INVALIDARG because the raygen/miss/hit shaders have no payload or
+    // attribute size. (This was the Phase 3 blocker.)
+    LPCWSTR shader_config_exports[] = { L"raygenMain", L"missMain", L"HitGroup" };
+    D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION shader_config_assoc = {};
+    shader_config_assoc.pSubobjectToAssociate = &subs[shader_config_idx];
+    shader_config_assoc.NumExports = 3;
+    shader_config_assoc.pExports = shader_config_exports;
+    {
+        D3D12_STATE_SUBOBJECT s = {};
+        s.Type = D3D12_STATE_SUBOBJECT_TYPE_SUBOBJECT_TO_EXPORTS_ASSOCIATION;
+        s.pDesc = &shader_config_assoc;
         subs.push_back(s);
     }
 
