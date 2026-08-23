@@ -739,8 +739,11 @@ bool Renderer::create_pipeline(std::string& error) {
     // DXR requires the shader config to be explicitly associated with the
     // shaders that use it. Without this, CreateStateObject fails with
     // E_INVALIDARG because the raygen/miss/hit shaders have no payload or
-    // attribute size. (This was the Phase 3 blocker.)
-    LPCWSTR shader_config_exports[] = { L"raygenMain", L"missMain", L"HitGroup" };
+    // attribute size. (This was the Phase 3 blocker.) Associate with the
+    // individual shader exports (raygen/miss/closest-hit) rather than the hit
+    // group name - this matches the canonical Microsoft HelloWorld sample and
+    // is what stricter drivers (e.g. RTX 50-series / Blackwell) expect.
+    LPCWSTR shader_config_exports[] = { L"raygenMain", L"missMain", L"hitMain" };
     D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION shader_config_assoc = {};
     shader_config_assoc.pSubobjectToAssociate = &subs[shader_config_idx];
     shader_config_assoc.NumExports = 3;
