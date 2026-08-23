@@ -63,6 +63,11 @@ private:
     // D3D12 objects.
     Microsoft::WRL::ComPtr<IDXGIFactory1>        factory_;
     Microsoft::WRL::ComPtr<ID3D12Device5>        device_;
+    // D3D12 info queue (only non-null when a debug layer is active, i.e.
+    // RSTR2_DEBUG + Graphics Tools, or a GPU debugger like PIX that injects
+    // the layer). Used to print the precise reason a call like CreateStateObject
+    // failed instead of a bare E_INVALIDARG.
+    Microsoft::WRL::ComPtr<ID3D12InfoQueue>      info_queue_;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue>   queue_;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> cmd_list_;

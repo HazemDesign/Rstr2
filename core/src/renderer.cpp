@@ -101,6 +101,24 @@ static void enable_d3d12_debug_layer() {
     rlogf("Rstr2Core: D3D12 debug layer ENABLED (RSTR2_DEBUG set)");
 }
 
+// Drain and print all stored D3D12 debug-layer messages. This is how we learn
+// the *precise* reason a call like CreateStateObject failed (the runtime only
+// returns a bare E_INVALIDARG otherwise). No-op if no debug layer / info queue.
+static void drain_info_queue(ID3D12InfoQueue* iq, const char* stage) {
+    if (!iq) return;
+    UINT64 n = iq->GetNumStoredMessages();
+    for (UINT64 i = 0; i < n; ++i) {
+        SIZE_T len = 0;
+        if (FAILED(iq->GetMessage(i, nullptr, &len)) || len == 0) continue;
+        std::vector<uint8_t> buf(len);
+        D3D12_MESSAGE* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+        if (SUCCEEDED(iq->GetMessage(i, msg, &len))) {
+            rlogf("Rstr2Core: [D3D12 %s] %s\n", stage, msg->pDescription);
+        }
+    }
+    iq->ClearStoredMessages();
+}
+
 // Create the TLAS SRV inside a shader-visible heap. Wrapped in SEH so a driver
 // stack-overflow / Blackwell quirk during view creation is reported instead of
 // silently terminating the process.
@@ -264,6 +282,12 @@ bool Renderer::init_dxr(std::string& error) {
         error = "Rstr2: no D3D12-capable GPU adapter found (or D3D12CreateDevice failed).";
         return false;
     }
+
+    // If a debug layer is active (RSTR2_DEBUG + Graphics Tools, or a GPU
+    // debugger like PIX that force-enables it), grab the info queue so we can
+    // print the precise reason a call like CreateStateObject fails instead of a
+    // bare E_INVALIDARG.
+    device_.As(&info_queue_);
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 opts5 = {};
     hr = device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &opts5, sizeof(opts5));
@@ -733,16 +757,22 @@ bool Renderer::create_pipeline(std::string& error) {
     so.NumSubobjects = static_cast<UINT>(subs.size());
     so.pSubobjects = subs.data();
 
+    if (info_queue_) info_queue_->ClearStoredMessages();
     HRESULT hr = device_->CreateStateObject(&so, IID_PPV_ARGS(&state_object_));
     rlogf("Rstr2Core: CreateStateObject returned 0x%08X\n",
                  static_cast<unsigned>(hr));
     if (FAILED(hr)) {
+        drain_info_queue(info_queue_.Get(), "CreateStateObject");
         error = "Rstr2: failed to create DXR state object (HRESULT 0x" +
                 std::to_string(static_cast<unsigned>(hr)) + ").";
         return false;
     }
     hr = state_object_->QueryInterface(IID_PPV_ARGS(&state_props_));
-    if (FAILED(hr)) { error = "Rstr2: failed to query ID3D12StateObjectProperties."; return false; }
+    if (FAILED(hr)) {
+        drain_info_queue(info_queue_.Get(), "QueryInterface(StateObjectProperties)");
+        error = "Rstr2: failed to query ID3D12StateObjectProperties.";
+        return false;
+    }
     return true;
 }
 
