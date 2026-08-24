@@ -34,6 +34,11 @@ const D3D12_HEAP_PROPERTIES kUploadHeap = []() {
     h.Type = D3D12_HEAP_TYPE_UPLOAD;
     return h;
 }();
+const D3D12_HEAP_PROPERTIES kReadbackHeap = []() {
+    D3D12_HEAP_PROPERTIES h = {};
+    h.Type = D3D12_HEAP_TYPE_READBACK;
+    return h;
+}();
 
 // Camera constant buffer layout must match cbuffer Camera in raytracing.hlsl.
 // Each float3 takes a 16-byte (vec4) register; the trailing scalar packs into
@@ -365,7 +370,7 @@ bool Renderer::create_resources(std::string& error) {
     D3D12_RESOURCE_DESC rb = ob;
     rb.Flags = D3D12_RESOURCE_FLAG_NONE;
     hr = device_->CreateCommittedResource(
-        &kDefaultHeap, D3D12_HEAP_FLAG_NONE, &rb,
+        &kReadbackHeap, D3D12_HEAP_FLAG_NONE, &rb,
         D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback_));
     rlogf("Rstr2Core: created readback buffer");
     if (FAILED(hr)) { error = "Rstr2: failed to create readback buffer."; return false; }
