@@ -26,11 +26,13 @@ jobs:
           # runtime from the NVIDIA driver (no import lib, nothing to ship).
           Invoke-WebRequest -Uri "https://github.com/NVIDIA/optix-dev/archive/refs/tags/$tag.zip" `
             -OutFile $zip -TimeoutSec 300 -Headers @{ 'User-Agent' = 'rstr2' }
+          if ((Get-Item $zip).Length -lt 1MB) { throw "optix-dev.zip looks too small" }
           Expand-Archive -Path $zip -DestinationPath optix_dev -Force
-          $inc = Join-Path $PWD "optix_dev\optix-dev-$tag\include"
-          if (-not (Test-Path (Join-Path $inc 'optix_stubs.h'))) {
-            throw "optix_stubs.h not found under $inc"
-          }
+          # Locate the headers regardless of the extracted top-level folder name.
+          $hdr = Get-ChildItem -Path optix_dev -Recurse -Filter 'optix_stubs.h' |
+                 Select-Object -First 1
+          if (-not $hdr) { throw "optix_stubs.h not found anywhere under optix_dev" }
+          $inc = $hdr.DirectoryName
           "OPTIX_INCLUDE_DIR=$inc" >> $env:GITHUB_ENV
           "Using OptiX include dir: $inc"
 
