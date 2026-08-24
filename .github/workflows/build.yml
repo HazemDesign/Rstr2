@@ -16,28 +16,21 @@ jobs:
         with:
           cuda: '12.5.0'
 
+      # OptiX 9.0 headers come from NVIDIA/optix-dev (headers only; optix.64.dll
+      # is loaded at runtime from the NVIDIA driver, so nothing to ship). Use a
+      # sparse checkout of just include/ (authenticated, avoids the flaky
+      # archive-zip download).
       - name: Fetch OptiX 9.0 headers (NVIDIA/optix-dev)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $tag = 'v9.0.0'
-          $zip = 'optix-dev.zip'
-          # optix-dev ships only the OptiX headers; optix.64.dll is loaded at
-          # runtime from the NVIDIA driver (no import lib, nothing to ship).
-          Invoke-WebRequest -Uri "https://github.com/NVIDIA/optix-dev/archive/refs/tags/$tag.zip" `
-            -OutFile $zip -TimeoutSec 300 -Headers @{ 'User-Agent' = 'rstr2' }
-          if ((Get-Item $zip).Length -lt 1MB) { throw "optix-dev.zip looks too small" }
-          Expand-Archive -Path $zip -DestinationPath optix_dev -Force
-          # Locate the headers regardless of the extracted top-level folder name.
-          $hdr = Get-ChildItem -Path optix_dev -Recurse -Filter 'optix_stubs.h' |
-                 Select-Object -First 1
-          if (-not $hdr) { throw "optix_stubs.h not found anywhere under optix_dev" }
-          $inc = $hdr.DirectoryName
-          "OPTIX_INCLUDE_DIR=$inc" >> $env:GITHUB_ENV
-          "Using OptiX include dir: $inc"
+        uses: actions/checkout@v4
+        with:
+          repository: NVIDIA/optix-dev
+          ref: v9.0.0
+          path: optix_dev
+          sparse-checkout: include
+          sparse-checkout-cone-mode: false
 
       - name: Configure
-        run: cmake -S core -B build -A x64 -DOPTIX_INCLUDE_DIR="$env:OPTIX_INCLUDE_DIR"
+        run: cmake -S core -B build -A x64 -DOPTIX_INCLUDE_DIR="optix_dev/include"
 
       - name: Build
         run: cmake --build build --config Release
