@@ -53,7 +53,7 @@ BOOL WINAPI console_ctrl_handler(DWORD /*ctrl*/) {
 
 void print_help() {
     std::printf(
-        "Rstr2Core - Phase 3 DXR renderer\n"
+        "Rstr2Core - Phase 3 OptiX renderer\n"
         "Usage: Rstr2Core [--width W] [--height H] [--shm NAME] [--ci]\n"
         "  --width  W   frame width  (default 960)\n"
         "  --height H   frame height (default 540)\n"
@@ -167,7 +167,7 @@ int main(int argc, char** argv) {
     }
 
     if (ci) {
-        std::printf("Rstr2Core 0.3.0 (Phase 3) - CI mode, no GPU init\n");
+        std::printf("Rstr2Core 0.3.0 (Phase 3, OptiX) - CI mode, no GPU init\n");
         return 0;
     }
 

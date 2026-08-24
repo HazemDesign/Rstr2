@@ -1,4 +1,4 @@
-name: build-core
+name: build-core-optix
 
 on:
   push:
@@ -11,73 +11,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch pinned dxc (DirectXShaderCompiler)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # Authenticate the release lookup so we don't burn the unauthenticated
-          # per-IP rate limit (60/hr) on the Windows runner. GITHUB_TOKEN can
-          # read any public repo's release metadata and raises the limit to 5000/hr.
-          $apiHeaders = @{
-            'User-Agent'    = 'rstr2-setup'
-            'Authorization' = "Bearer ${{ secrets.GITHUB_TOKEN }}"
-          }
-          try {
-            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest" -Headers $apiHeaders
-            $asset = $rel.assets | Where-Object { $_.name -like 'dxc*.zip' -and $_.name -notlike '*arm*' -and $_.name -notlike '*linux*' } | Select-Object -First 1
-            if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -like 'dxc*.zip' -and $_.name -notlike '*arm*' } | Select-Object -First 1 }
-            if (-not $asset) { throw "No dxc asset in latest DirectXShaderCompiler release" }
-            Write-Host "dxc asset: $($asset.name) -> $($asset.browser_download_url)"
-            $ok = $false
-            for ($i = 1; $i -le 3; $i++) {
-              try {
-                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile dxc.zip -TimeoutSec 300 -Headers @{ 'User-Agent' = 'rstr2-setup' }
-                Expand-Archive dxc.zip dxc_tool -Force
-                $ok = $true
-                break
-              } catch {
-                Write-Host "dxc download/extract attempt $i failed: $($_.Exception.Message)"
-                Start-Sleep -Seconds 5
-              }
-            }
-            if (-not $ok) { throw "Failed to download/extract dxc after retries" }
-            $dxc = Join-Path $PWD "dxc_tool\bin\x64\dxc.exe"
-            if (-not (Test-Path $dxc)) { $dxc = (Get-ChildItem dxc_tool -Recurse -Filter dxc.exe | Select-Object -First 1).FullName }
-            if (-not (Test-Path $dxc)) { throw "dxc.exe not found after extraction" }
-            & $dxc --version
-            $shader = Join-Path $PWD "core\shaders\raytracing.hlsl"
-            $csoOut = Join-Path $PWD "core\shaders\raytracing.cso"
-            Write-Host "Compiling shader with pinned dxc..."
-            & $dxc -T lib_6_5 -HV 2021 -Fo $csoOut $shader
-            if ($LASTEXITCODE -ne 0) { throw "dxc failed to compile raytracing.hlsl (exit $LASTEXITCODE)" }
-            if (-not (Test-Path $csoOut)) { throw "raytracing.cso was not produced" }
-            "DXC_EXECUTABLE=$dxc" >> $env:GITHUB_ENV
-            "RAYTRACING_CSO=$csoOut" >> $env:GITHUB_ENV
-            "Using dxc: $dxc ; cso: $csoOut"
-          } catch {
-            Write-Error "dxc fetch failed: $($_.Exception.Message)"
-            exit 1
-          }
+      - name: Install CUDA toolkit (nvcc)
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: '12.8.0'
 
-      - name: Fetch Agility SDK (matching D3D12 debug layer)
+      - name: Fetch OptiX 9.0 headers (NVIDIA/optix-dev)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ver = "1.619.0"
-          $idx = Invoke-RestMethod -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/index.json" -Headers @{ 'User-Agent' = 'rstr2-setup' }
-          if ($ver -notin $idx.versions) { throw "Agility SDK $ver not found in Microsoft.Direct3D.D3D12" }
-          $nupkg = "agility.nupkg"
-          Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/$ver/microsoft.direct3d.d3d12.$ver.nupkg" -OutFile $nupkg -Headers @{ 'User-Agent' = 'rstr2-setup' } -TimeoutSec 300
-          Copy-Item $nupkg "agility.zip" -Force
-          Expand-Archive -Path "agility.zip" -DestinationPath agility_pkg -Force
-          $sdk = Join-Path $PWD "agility_pkg\build\native"
-          if (-not (Test-Path (Join-Path $sdk "bin\x64\D3D12Core.dll"))) { throw "Agility D3D12Core.dll missing from package" }
-          if (-not (Test-Path (Join-Path $sdk "include\d3d12.h"))) { throw "Agility d3d12.h missing from package" }
-          "AGILITY_SDK_DIR=$sdk" >> $env:GITHUB_ENV
-          "Using Agility SDK: $sdk"
+          $tag = 'v9.0.0'
+          $zip = 'optix-dev.zip'
+          # optix-dev ships only the OptiX headers; optix.64.dll is loaded at
+          # runtime from the NVIDIA driver (no import lib, nothing to ship).
+          Invoke-WebRequest -Uri "https://github.com/NVIDIA/optix-dev/archive/refs/tags/$tag.zip" `
+            -OutFile $zip -TimeoutSec 300 -Headers @{ 'User-Agent' = 'rstr2' }
+          Expand-Archive -Path $zip -DestinationPath optix_dev -Force
+          $inc = Join-Path $PWD "optix_dev\optix-dev-$tag\include"
+          if (-not (Test-Path (Join-Path $inc 'optix_stubs.h'))) {
+            throw "optix_stubs.h not found under $inc"
+          }
+          "OPTIX_INCLUDE_DIR=$inc" >> $env:GITHUB_ENV
+          "Using OptiX include dir: $inc"
 
       - name: Configure
-        run: cmake -S core -B build -A x64
+        run: cmake -S core -B build -A x64 -DOPTIX_INCLUDE_DIR="$env:OPTIX_INCLUDE_DIR"
 
       - name: Build
         run: cmake --build build --config Release
@@ -90,6 +48,4 @@ jobs:
           name: Rstr2Core-win64
           path: |
             build/Release/Rstr2Core.exe
-            build/Release/raytracing.cso
-            build/Release/D3D12/D3D12Core.dll
-            build/Release/D3D12/d3d12SDKLayers.dll
+            build/Release/optix_kernels.ptx

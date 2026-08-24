@@ -25,10 +25,10 @@ def core_exe_path():
     return None
 
 
-def core_cso_path():
-    """Return the path to raytracing.cso next to Rstr2Core.exe, or None."""
+def core_ptx_path():
+    """Return the path to optix_kernels.ptx next to Rstr2Core.exe, or None."""
     try:
-        p = Path(__file__).resolve().parents[1] / "bin" / "raytracing.cso"
+        p = Path(__file__).resolve().parents[1] / "bin" / "optix_kernels.ptx"
         if p.is_file():
             return p
     except Exception:

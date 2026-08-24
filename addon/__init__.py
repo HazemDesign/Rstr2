@@ -361,13 +361,13 @@ class Rstr2Engine(RenderEngine):
                 from . import core_proc
 
                 exe = core_proc.core_exe_path()
-                cso = core_proc.core_cso_path()
+                ptx = core_proc.core_ptx_path()
                 if exe is None:
                     self._core_ok = False
                     self._core_msg = "Rstr2Core.exe missing in bin/"
-                elif cso is None:
+                elif ptx is None:
                     self._core_ok = False
-                    self._core_msg = "raytracing.cso missing in bin/"
+                    self._core_msg = "optix_kernels.ptx missing in bin/"
                 else:
                     self._core = core_proc.CoreProcess()
                     self._core.launch()
