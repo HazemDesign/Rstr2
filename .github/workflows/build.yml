@@ -59,6 +59,27 @@ jobs:
             exit 1
           }
 
+      - name: Fetch Agility SDK (matching D3D12 debug layer)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = "1.619.0"
+          $apiHeaders = @{
+            'User-Agent'    = 'rstr2-setup'
+            'Authorization' = "Bearer ${{ secrets.GITHUB_TOKEN }}"
+          }
+          $idx = Invoke-RestMethod -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/index.json" -Headers $apiHeaders
+          if ($ver -notin $idx.versions) { throw "Agility SDK $ver not found in Microsoft.Direct3D.D3D12" }
+          $nupkg = "agility.nupkg"
+          Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/$ver/microsoft.direct3d.d3d12.$ver.nupkg" -OutFile $nupkg -Headers @{ 'User-Agent' = 'rstr2-setup' } -TimeoutSec 300
+          Copy-Item $nupkg "agility.zip" -Force
+          Expand-Archive -Path "agility.zip" -DestinationPath agility_pkg -Force
+          $sdk = Join-Path $PWD "agility_pkg\build\native"
+          if (-not (Test-Path (Join-Path $sdk "bin\x64\D3D12Core.dll"))) { throw "Agility D3D12Core.dll missing from package" }
+          if (-not (Test-Path (Join-Path $sdk "include\d3d12.h"))) { throw "Agility d3d12.h missing from package" }
+          "AGILITY_SDK_DIR=$sdk" >> $env:GITHUB_ENV
+          "Using Agility SDK: $sdk"
+
       - name: Configure
         run: cmake -S core -B build -A x64
 
@@ -74,3 +95,5 @@ jobs:
           path: |
             build/Release/Rstr2Core.exe
             build/Release/raytracing.cso
+            build/Release/D3D12Core.dll
+            build/Release/d3d12SDKLayers.dll

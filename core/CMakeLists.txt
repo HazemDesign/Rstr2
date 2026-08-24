@@ -82,6 +82,30 @@ add_custom_command(TARGET Rstr2Core POST_BUILD
             ${CSO_PATH} $<TARGET_FILE_DIR:Rstr2Core>/raytracing.cso
     COMMENT "Copying raytracing.cso next to Rstr2Core.exe")
 
+# --- Optional Agility SDK (matching D3D12 debug layer) ---
+# When AGILITY_SDK_DIR points at an extracted Microsoft.Direct3D.D3D12
+# package's build/native directory, use its headers (so D3D12_AGILITY_SDK_VERSION
+# is defined) and ship its D3D12Core.dll + d3d12SDKLayers.dll next to the exe.
+# The OS loader then side-loads the Agility runtime + a version-matched debug
+# layer, which is required to get precise D3D12 validation errors (e.g. from
+# CreateStateObject) on systems whose OS d3d12.dll / Graphics-Tools debug layer
+# are version-mismatched. The app still links the normal Windows SDK d3d12.lib.
+if(DEFINED ENV{AGILITY_SDK_DIR} AND NOT "$ENV{AGILITY_SDK_DIR}" STREQUAL "")
+    set(AGILITY_SDK_DIR "$ENV{AGILITY_SDK_DIR}")
+    message(STATUS "Rstr2Core: using Agility SDK at ${AGILITY_SDK_DIR}")
+    target_include_directories(Rstr2Core PRIVATE
+        ${AGILITY_SDK_DIR}/include
+        ${AGILITY_SDK_DIR}/include/d3dx12)
+    add_custom_command(TARGET Rstr2Core POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${AGILITY_SDK_DIR}/bin/x64/D3D12Core.dll
+                $<TARGET_FILE_DIR:Rstr2Core>/D3D12Core.dll
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${AGILITY_SDK_DIR}/bin/x64/d3d12SDKLayers.dll
+                $<TARGET_FILE_DIR:Rstr2Core>/d3d12SDKLayers.dll
+        COMMENT "Copying Agility SDK D3D12Core.dll + d3d12SDKLayers.dll next to Rstr2Core.exe")
+endif()
+
 if(WIN32)
     target_link_libraries(Rstr2Core PRIVATE user32 d3d12 dxgi dxguid)
     # DXR driver call chains (notably CreateStateObject / device init) can
