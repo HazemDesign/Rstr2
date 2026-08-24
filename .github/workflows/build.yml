@@ -30,7 +30,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Configure
-        run: cmake -S core -B build -A x64 -DOPTIX_INCLUDE_DIR="optix_dev/include"
+        run: cmake -S core -B build -A x64 -DOPTIX_INCLUDE_DIR="$PWD/optix_dev/include"
 
       - name: Build
         run: cmake --build build --config Release
