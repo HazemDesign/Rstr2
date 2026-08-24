@@ -38,8 +38,19 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
+      - name: Dump exe imports
+        if: always()
+        shell: pwsh
+        run: |
+          $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $db = Get-ChildItem (Join-Path $install "VC\Tools\MSVC") -Recurse -Filter dumpbin.exe | Select-Object -First 1
+          if ($db) { & $db.FullName /dependents build/Release/Rstr2Core.exe } else { "dumpbin not found" }
+
       - name: Smoke run
-        run: ./build/Release/Rstr2Core.exe --ci
+        shell: cmd
+        run: |
+          build\Release\Rstr2Core.exe --ci & echo EXITCODE=%ERRORLEVEL%
 
       - uses: actions/upload-artifact@v4
         with:
