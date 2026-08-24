@@ -7,7 +7,10 @@ on:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    # windows-2022 ships Visual Studio 2022 (MSVC 19.4x), which CUDA 12.5
+    # officially supports. windows-latest (VS2026) is too new for CUDA 12.5's
+    # nvcc/STL and breaks compilation.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
