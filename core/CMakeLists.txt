@@ -38,6 +38,10 @@ add_custom_command(
             "${OPTIX_KERNEL}"
             -o "${PTX_PATH}"
             --gpu-architecture=compute_70
+            # The CI runner ships VS2026/MSVC newer than CUDA 12.5 officially
+            # supports; we only emit PTX (no host object), so override the
+            # host-compiler version check.
+            -allow-unsupported-compiler
     DEPENDS ${OPTIX_KERNEL} ${CMAKE_CURRENT_SOURCE_DIR}/src/optix_params.h
     COMMENT "Compiling optix_kernels.cu -> optix_kernels.ptx (nvcc)")
 
