@@ -2,10 +2,10 @@
 //
 // Ray-traces a world-space triangle soup supplied by the native core: the
 // BLAS/TLAS are built from the scene bridge, and the camera basis arrives via
-// a constant buffer. Output is written to a RWBuffer<float4> (RGBA32F) at
+// a constant buffer. Output is written to a RWStructuredBuffer<float4> (RGBA32F) at
 // linear index (y * width + x); the first row of the buffer is the TOP.
 
-RWBuffer<float4> gOutput : register(u0);
+RWStructuredBuffer<float4> gOutput : register(u0);
 RaytracingAccelerationStructure SceneBVH : register(t0);
 StructuredBuffer<float3> Vertices : register(t1);
 StructuredBuffer<uint> Indices : register(t2);
