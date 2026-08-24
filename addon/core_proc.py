@@ -67,6 +67,7 @@ class CoreProcess:
         try:
             self._proc = subprocess.Popen(
                 [str(exe), "--width", str(width), "--height", str(height)],
+                cwd=str(exe.parent),
                 creationflags=CREATE_NO_WINDOW,
                 stdout=self._log,
                 stderr=self._log,
