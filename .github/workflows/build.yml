@@ -64,11 +64,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $ver = "1.619.0"
-          $apiHeaders = @{
-            'User-Agent'    = 'rstr2-setup'
-            'Authorization' = "Bearer ${{ secrets.GITHUB_TOKEN }}"
-          }
-          $idx = Invoke-RestMethod -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/index.json" -Headers $apiHeaders
+          $idx = Invoke-RestMethod -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/index.json" -Headers @{ 'User-Agent' = 'rstr2-setup' }
           if ($ver -notin $idx.versions) { throw "Agility SDK $ver not found in Microsoft.Direct3D.D3D12" }
           $nupkg = "agility.nupkg"
           Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/$ver/microsoft.direct3d.d3d12.$ver.nupkg" -OutFile $nupkg -Headers @{ 'User-Agent' = 'rstr2-setup' } -TimeoutSec 300
