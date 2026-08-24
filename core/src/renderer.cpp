@@ -259,9 +259,9 @@ bool Renderer::init_dxr(std::string& error) {
         if (SUCCEEDED(dh)) {
             Microsoft::WRL::ComPtr<ID3D12Debug3> dbg3;
             if (SUCCEEDED(dbg.As(&dbg3))) {
-                dbg3->SetEnableGPUBasedValidation(FALSE);
+                dbg3->SetEnableGPUBasedValidation(TRUE);
                 dbg3->SetEnableSynchronizedCommandQueueValidation(FALSE);
-                rlogf("Rstr2Core: debug layer present, disabled GPU-Based Validation");
+                rlogf("Rstr2Core: debug layer present, GPU-Based Validation ENABLED (diag)");
             } else {
                 rlogf("Rstr2Core: debug layer present (ID3D12Debug only), could not disable GBV");
             }
@@ -833,6 +833,7 @@ bool Renderer::create_sbt(std::string& error) {
 bool Renderer::render_frame(float* out_pixels, std::string& error) {
     HRESULT hr = cmd_list_->Reset(allocator_.Get(), nullptr);
     if (FAILED(hr)) { error = "Rstr2: command list reset failed."; return false; }
+    rlogf("Rstr2Core: rf reset ok\n");
 
     cmd_list_->SetPipelineState1(state_object_.Get());
     cmd_list_->SetComputeRootSignature(global_rs_.Get());
@@ -844,6 +845,7 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     cmd_list_->SetComputeRootShaderResourceView(2, index_buf_->GetGPUVirtualAddress());
     cmd_list_->SetComputeRootConstantBufferView(3, cam_cbv_->GetGPUVirtualAddress());
     cmd_list_->SetComputeRootUnorderedAccessView(4, output_->GetGPUVirtualAddress());
+    rlogf("Rstr2Core: rf roots set\n");
 
     D3D12_DISPATCH_RAYS_DESC dr = {};
     dr.RayGenerationShaderRecord.StartAddress = sbt_->GetGPUVirtualAddress() + sbt_raygen_offset_;
@@ -861,6 +863,7 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
         rlogf("Rstr2Core: %s\n", error.c_str());
         return false;
     }
+    rlogf("Rstr2Core: rf dispatched\n");
 
     D3D12_RESOURCE_BARRIER b = {};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -875,14 +878,18 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
 
     hr = cmd_list_->Close();
     if (FAILED(hr)) { error = "Rstr2: command list close failed."; return false; }
+    rlogf("Rstr2Core: rf closed\n");
     ID3D12CommandList* lists[] = { cmd_list_.Get() };
     queue_->ExecuteCommandLists(1, lists);
+    rlogf("Rstr2Core: rf executed\n");
     wait_for_gpu();
+    rlogf("Rstr2Core: rf gpu done\n");
 
     void* rb = nullptr;
     readback_->Map(0, nullptr, &rb);
     std::memcpy(out_pixels, rb, static_cast<size_t>(bytes));
     readback_->Unmap(0, nullptr);
+    rlogf("Rstr2Core: rf copied\n");
 
     static bool s_first_frame = true;
     if (s_first_frame) {
