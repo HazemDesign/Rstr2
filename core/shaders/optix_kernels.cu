@@ -22,7 +22,9 @@ using namespace rstr2;
 // Launch parameters provided by the host. Bound by optixLaunch. Declared in
 // the global namespace (name "params") so the pipeline's
 // pipelineLaunchParamsVariableName = "params" resolves to this symbol.
-rstr2::Params params;
+// Marked __device__ so device code may read it (OptiX binds the launch-param
+// buffer to this symbol at optixLaunch time).
+__device__ rstr2::Params params;
 
 // Vec3F <-> float3 reinterpretation (identical 12-byte layout).
 static __forceinline__ float3 to_float3(const Vec3F& v) {
