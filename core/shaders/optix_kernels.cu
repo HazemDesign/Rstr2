@@ -24,6 +24,18 @@ static __forceinline__ float3 to_float3(const Vec3F& v) {
     return make_float3(v.x, v.y, v.z);
 }
 
+// CUDA vector types do not provide fabs(float3) nor scalar*float3 / float3+scalar
+// operators, so provide explicit helpers.
+static __forceinline__ float3 vabs3(float3 a) {
+    return make_float3(fabsf(a.x), fabsf(a.y), fabsf(a.z));
+}
+static __forceinline__ float3 smul(float3 a, float s) {
+    return make_float3(a.x * s, a.y * s, a.z * s);
+}
+static __forceinline__ float3 sadd(float3 a, float s) {
+    return make_float3(a.x + s, a.y + s, a.z + s);
+}
+
 extern "C" __global__ void __raygen__rg() {
     uint3 idx = optixGetLaunchIndex();
     uint3 dim = optixGetLaunchDimensions();
@@ -45,8 +57,8 @@ extern "C" __global__ void __raygen__rg() {
 
     float3 dir = normalize(
         fwd +
-        ndc.x * aspect * params.cam_tan_half_fov_y * right +
-        ndc.y * params.cam_tan_half_fov_y * up);
+        smul(right, ndc.x * aspect * params.cam_tan_half_fov_y) +
+        smul(up, ndc.y * params.cam_tan_half_fov_y));
 
     unsigned int p0 = __float_as_uint(0.0f);
     unsigned int p1 = __float_as_uint(0.0f);
@@ -91,10 +103,10 @@ extern "C" __global__ void __closesthit__ch() {
 
     // Phase 3 shading: normal-tinted base + fixed key light.
     // (Many lights / ReSTIR DI arrive in a later phase.)
-    float3 base = fabs(N) * 0.55f + 0.20f;
+    float3 base = sadd(smul(vabs3(N), 0.55f), 0.20f);
     float3 lightDir = normalize(make_float3(0.4f, 0.8f, -0.3f));
     float ndl = fmaxf(dot(N, lightDir), 0.0f);
-    float3 color = base * (0.25f + 0.75f * ndl);
+    float3 color = smul(base, 0.25f + 0.75f * ndl);
 
     optixSetPayload_0(__float_as_uint(color.x));
     optixSetPayload_1(__float_as_uint(color.y));
