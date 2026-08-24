@@ -65,15 +65,16 @@ static __forceinline__ float3 vnorm(float3 a) {
 
 extern "C" __global__ void __raygen__rg() {
     uint3 idx = optixGetLaunchIndex();
-    uint3 dim = optixGetLaunchDimensions();
 
     unsigned int pixel_idx = idx.y * params.width + idx.x;
 
     // uv in [0,1]; flip Y so the first row of the buffer is the TOP of the image.
-    float2 uv = (make_float2((float)idx.x, (float)idx.y) + 0.5f) /
-                make_float2((float)params.width, (float)params.height);
-    float2 ndc = uv * 2.0f - 1.0f;
-    ndc.y = -ndc.y;
+    // (Scalar math only: CUDA's float2/float3 operator overloads are not
+    // reliably available with the unsupported host compiler, so we avoid them.)
+    float fx = ((float)idx.x + 0.5f) / (float)params.width;
+    float fy = ((float)idx.y + 0.5f) / (float)params.height;
+    float ndcx = fx * 2.0f - 1.0f;
+    float ndcy = -(fy * 2.0f - 1.0f);
 
     float aspect = (float)params.width / (float)params.height;
 
@@ -83,8 +84,8 @@ extern "C" __global__ void __raygen__rg() {
     float3 up     = to_float3(params.cam_up);
 
     float3 dir = vnorm(vadd(vadd(fwd,
-                          smul(right, ndc.x * aspect * params.cam_tan_half_fov_y)),
-                          smul(up, ndc.y * params.cam_tan_half_fov_y)));
+                          smul(right, ndcx * aspect * params.cam_tan_half_fov_y)),
+                          smul(up, ndcy * params.cam_tan_half_fov_y)));
 
     unsigned int p0 = __float_as_uint(0.0f);
     unsigned int p1 = __float_as_uint(0.0f);
