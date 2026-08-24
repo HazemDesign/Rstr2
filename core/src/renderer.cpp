@@ -202,9 +202,9 @@ struct Renderer::Impl {
 
         char log[8192] = {};
         size_t log_size = sizeof(log);
-        OPTIX_CHECK(optixModuleCreateFromPTX(optix_ctx, &mco, &pco,
-                                             ptx.c_str(), ptx.size(), log,
-                                             &log_size, &module));
+        OPTIX_CHECK(optixModuleCreate(optix_ctx, &mco, &pco,
+                                     ptx.c_str(), ptx.size(), log,
+                                     &log_size, &module));
         if (log[0]) rlogf("Rstr2Core: [optix module] %s", log);
 
         OptixProgramGroupDesc descs[3] = {};
@@ -340,7 +340,7 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
     build_input.triangleArray.flags = &tri_flags;
 
     OptixAccelBuildOptions accel_opts = {};
-    accel_opts.buildFlags = OPTIX_ACCEL_FLAG_PREFER_FAST_TRACE;
+    accel_opts.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
     accel_opts.operation = OPTIX_BUILD_OPERATION_BUILD;
 
     OptixAccelBufferSizes gas_sizes;
