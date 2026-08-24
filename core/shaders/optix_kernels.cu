@@ -27,39 +27,39 @@ using namespace rstr2;
 __device__ rstr2::Params params;
 
 // Vec3F <-> float3 reinterpretation (identical 12-byte layout).
-static __forceinline__ float3 to_float3(const Vec3F& v) {
+static __forceinline__ __device__ float3 to_float3(const Vec3F& v) {
     return make_float3(v.x, v.y, v.z);
 }
 
 // --- Explicit float3 math (no reliance on CUDA vector operator overloads) ---
-static __forceinline__ float3 vneg(float3 a) {
+static __forceinline__ __device__ float3 vneg(float3 a) {
     return make_float3(-a.x, -a.y, -a.z);
 }
-static __forceinline__ float3 vadd(float3 a, float3 b) {
+static __forceinline__ __device__ float3 vadd(float3 a, float3 b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
-static __forceinline__ float3 vsub(float3 a, float3 b) {
+static __forceinline__ __device__ float3 vsub(float3 a, float3 b) {
     return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
-static __forceinline__ float3 vabs3(float3 a) {
+static __forceinline__ __device__ float3 vabs3(float3 a) {
     return make_float3(fabsf(a.x), fabsf(a.y), fabsf(a.z));
 }
-static __forceinline__ float3 smul(float3 a, float s) {
+static __forceinline__ __device__ float3 smul(float3 a, float s) {
     return make_float3(a.x * s, a.y * s, a.z * s);
 }
-static __forceinline__ float3 sadd(float3 a, float s) {
+static __forceinline__ __device__ float3 sadd(float3 a, float s) {
     return make_float3(a.x + s, a.y + s, a.z + s);
 }
-static __forceinline__ float vdot(float3 a, float3 b) {
+static __forceinline__ __device__ float vdot(float3 a, float3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
-static __forceinline__ float3 vcross(float3 a, float3 b) {
+static __forceinline__ __device__ float3 vcross(float3 a, float3 b) {
     return make_float3(
         a.y * b.z - a.z * b.y,
         a.z * b.x - a.x * b.z,
         a.x * b.y - a.y * b.x);
 }
-static __forceinline__ float3 vnorm(float3 a) {
+static __forceinline__ __device__ float3 vnorm(float3 a) {
     return smul(a, rsqrtf(vdot(a, a)));
 }
 
