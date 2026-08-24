@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
-project(Rstr2Core LANGUAGES CXX CUDA)
+# CXX only: the OptiX kernel is compiled to PTX with nvcc via a custom command
+# below, so we do NOT enable the CMake CUDA language (which would force CMake to
+# locate a CUDA VS toolset that CUDA 12.5 does not provide for VS2026).
+project(Rstr2Core LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +18,11 @@ message(STATUS "Rstr2Core: OptiX include dir = ${OPTIX_INCLUDE_DIR}")
 
 find_package(CUDAToolkit REQUIRED)
 
+# Locate nvcc for the PTX custom command (independent of the CMake CUDA language).
+find_program(NVCC nvcc REQUIRED
+    PATHS "$ENV{CUDA_PATH}/bin" "$ENV{CUDA_PATH_V12_5}/bin"
+    DOC "CUDA compiler used to build the OptiX PTX kernel")
+
 # --- Compile the OptiX kernel to PTX with nvcc -------------------------------
 # The kernel is compiled to PTX (architecture-independent) and loaded at
 # runtime by optixModuleCreateFromPTX. It must NOT be compiled into the
@@ -22,13 +30,9 @@ find_package(CUDAToolkit REQUIRED)
 set(OPTIX_KERNEL ${CMAKE_CURRENT_SOURCE_DIR}/shaders/optix_kernels.cu)
 set(PTX_PATH ${CMAKE_CURRENT_BINARY_DIR}/optix_kernels.ptx)
 
-if(NOT CMAKE_CUDA_COMPILER)
-    message(FATAL_ERROR "Rstr2Core: nvcc (CUDA toolkit) not found.")
-endif()
-
 add_custom_command(
     OUTPUT ${PTX_PATH}
-    COMMAND ${CMAKE_CUDA_COMPILER} -ptx
+    COMMAND ${NVCC} -ptx
             -I"${OPTIX_INCLUDE_DIR}"
             -I"${CMAKE_CURRENT_SOURCE_DIR}/src"
             "${OPTIX_KERNEL}"
