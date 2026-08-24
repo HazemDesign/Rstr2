@@ -162,6 +162,10 @@ class Rstr2Engine(RenderEngine):
         self._cached_pixels = None
         self._dbg = ""             # short status shown in the viewport
 
+        # Phase 3: camera/geometry liveness tracking.
+        self._geom_dirty = True
+        self._last_cam_sig = None
+
     # ------------------------------------------------------------------
     # Final render (F12 / CLI)
     # ------------------------------------------------------------------
@@ -190,6 +194,10 @@ class Rstr2Engine(RenderEngine):
         else:
             self.update_stats("", "Rstr2: rendering live core")
 
+        # Buffer row 0 is the TOP of the image; Blender's result rect is
+        # bottom-up, so flip rows to display upright.
+        pixels = pixels[::-1, :, :]
+
         result = self.begin_result(0, 0, width, height)
         layer = result.layers[0].passes["Combined"]
         layer.rect = pixels.reshape(-1, 4)
@@ -200,12 +208,10 @@ class Rstr2Engine(RenderEngine):
     # Viewport sync
     # ------------------------------------------------------------------
     def view_update(self, context, depsgraph):
-        # Phase 3: push the current scene (meshes + camera) to the native core.
-        try:
-            self._sync_scene(depsgraph)
-        except Exception as e:
-            self._dbg = "sync err: %s" % str(e)[:60]
-        # Keep redrawing so the live core feed updates.
+        # Phase 3: flag the scene (meshes + camera) for re-publish to the
+        # native core. The actual publish happens in view_draw so it runs on
+        # every redraw and stays live during camera orbit/zoom.
+        self._geom_dirty = True
         self.tag_redraw()
 
     # ------------------------------------------------------------------
@@ -218,6 +224,19 @@ class Rstr2Engine(RenderEngine):
         region = context.region
         width = max(region.width, 2)
         height = max(region.height, 2)
+
+        # Phase 3: keep the native core fed with the current camera + scene so
+        # orbit/zoom in the viewport reach the renderer live. We only re-publish
+        # when the camera actually moved (or geometry was flagged dirty), which
+        # the SceneWriter then coalesces to avoid needless BVH rebuilds.
+        try:
+            cam_sig = self._camera_sig(depsgraph)
+            if self._geom_dirty or cam_sig != self._last_cam_sig:
+                self._sync_scene(depsgraph)
+                self._last_cam_sig = cam_sig
+                self._geom_dirty = False
+        except Exception as e:
+            self._dbg = "sync err: %s" % str(e)[:60]
 
         # Try to pull a live core frame; keep the animated test pattern as
         # a fallback when the core is absent or mid-update.
@@ -257,7 +276,9 @@ class Rstr2Engine(RenderEngine):
         uv_id = vformat.attr_add(id="texCoord", comp_type="F32", len=2, fetch_mode="FLOAT")
         vbo = GPUVertBuf(vformat, 4)
         vbo.attr_fill(id=pos_id, data=[(0, 0), (width, 0), (width, height), (0, height)])
-        vbo.attr_fill(id=uv_id, data=[(0, 0), (1, 0), (1, 1), (0, 1)])
+        # Flip V so the shared-memory buffer (first row = TOP) maps upright:
+        # screen-top samples buffer row 0 instead of the last row.
+        vbo.attr_fill(id=uv_id, data=[(0, 1), (1, 1), (1, 0), (0, 0)])
         batch = GPUBatch(type="TRI_FAN", buf=vbo)
 
         gpu.state.blend_set("ALPHA_PREMULT")
@@ -275,6 +296,28 @@ class Rstr2Engine(RenderEngine):
     # ------------------------------------------------------------------
     # Phase 3 scene bridge helpers
     # ------------------------------------------------------------------
+    def _camera_sig(self, depsgraph):
+        """Cheap signature of the active camera (basis + vertical FOV).
+
+        Used by view_draw to re-publish the scene only when the camera
+        actually moved, so orbit/zoom in the viewport reaches the core live.
+        """
+        cam = depsgraph.scene.camera
+        if cam is None:
+            return ("default",)
+        cd = cam.data
+        fov_y = getattr(cd, "angle_y", None)
+        if fov_y is None:
+            fov_y = cd.angle
+        mw = cam.matrix_world
+        return (
+            round(float(mw[0][3]), 4), round(float(mw[1][3]), 4), round(float(mw[2][3]), 4),
+            round(float(mw[0][0]), 4), round(float(mw[1][0]), 4), round(float(mw[2][0]), 4),
+            round(float(mw[0][1]), 4), round(float(mw[1][1]), 4), round(float(mw[2][1]), 4),
+            round(float(mw[0][2]), 4), round(float(mw[1][2]), 4), round(float(mw[2][2]), 4),
+            round(float(fov_y), 4),
+        )
+
     def _ensure_scene_writer(self):
         """Lazily create the addon->core scene mapping writer."""
         if self._scene_writer is None:

@@ -86,8 +86,9 @@ class SceneWriter:
         self._addr = None
         self._max_bytes = max_bytes
         self._epoch = 0
-        self._create(name)
+        self._last_sig = None
 
+        self._create(name)
     # ------------------------------------------------------------------
     def _create(self, name):
         try:
@@ -147,6 +148,18 @@ class SceneWriter:
             # Copy vertices then indices into the view.
             vbuf = np.ascontiguousarray(vertices, dtype=np.float32).ravel().tobytes()
             ibuf = np.ascontiguousarray(indices, dtype=np.uint32).ravel().tobytes()
+            cam_key = (
+                tuple(float(x) for x in camera["origin"]),
+                tuple(float(x) for x in camera["right"]),
+                tuple(float(x) for x in camera["up"]),
+                tuple(float(x) for x in camera["forward"]),
+                float(camera["tan_half_fov_y"]),
+            )
+            sig = (vbuf, ibuf, cam_key)
+            if sig == self._last_sig:
+                return True
+            self._last_sig = sig
+
             vdst = self._addr + HEADER_SIZE
             idst = self._addr + HEADER_SIZE + vbytes
             ctypes.memmove(vdst, vbuf, vbytes)
