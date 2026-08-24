@@ -38,7 +38,6 @@ add_custom_command(
             "${OPTIX_KERNEL}"
             -o "${PTX_PATH}"
             --gpu-architecture=compute_70
-            --warn-no-double-promotion
     DEPENDS ${OPTIX_KERNEL} ${CMAKE_CURRENT_SOURCE_DIR}/src/optix_params.h
     COMMENT "Compiling optix_kernels.cu -> optix_kernels.ptx (nvcc)")
 
