@@ -7,11 +7,12 @@
 #include "renderer.h"
 #include "optix_params.h"
 
-// OptiX 7+ loads optix.64.dll from the NVIDIA driver at runtime via the stub
-// table (no import lib, nothing to ship). Defining OPTIX_STUBS_DEFINE_FUNCTION_TABLE
-// in exactly one TU creates the table + optixInit() that resolves it.
-#define OPTIX_STUBS_DEFINE_FUNCTION_TABLE
+// OptiX 9 loads optix.64.dll from the NVIDIA driver at runtime via the stub
+// table (no import lib, nothing to ship). The function-table instance must be
+// defined in exactly one TU by including optix_function_table_definition.h,
+// which provides the symbol that optixInit() populates.
 #include <optix_stubs.h>
+#include <optix_function_table_definition.h>
 #include <cuda.h>
 
 #include <windows.h>
