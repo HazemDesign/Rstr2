@@ -25,7 +25,7 @@ find_program(NVCC nvcc REQUIRED
 
 # --- Compile the OptiX kernel to PTX with nvcc -------------------------------
 # The kernel is compiled to PTX (architecture-independent) and loaded at
-# runtime by optixModuleCreateFromPTX. It must NOT be compiled into the
+# runtime by optixModuleCreate. It must NOT be compiled into the
 # executable as a normal CUDA translation unit.
 set(OPTIX_KERNEL ${CMAKE_CURRENT_SOURCE_DIR}/shaders/optix_kernels.cu)
 set(PTX_PATH ${CMAKE_CURRENT_BINARY_DIR}/optix_kernels.ptx)
@@ -69,14 +69,14 @@ target_include_directories(Rstr2Core PRIVATE
     ${CUDAToolkit_INCLUDE_DIRS})
 
 # CUDA driver API (cuInit, cuMem*, ...) is provided by the NVIDIA driver's
-# cuda.dll. We delay-load it so the --ci smoke run (which never touches CUDA)
-# still starts on machines without an NVIDIA driver.
+# nvcuda.dll (the Windows CUDA driver import). We delay-load it so the --ci
+# smoke run (which never touches CUDA) still starts on machines without an
+# NVIDIA driver; on a real GPU host nvcuda.dll is loaded on first CUDA call.
 target_link_libraries(Rstr2Core PRIVATE
     CUDA::cuda_driver
     user32
     delayimp)
 
 if(WIN32)
-    target_link_options(Rstr2Core PRIVATE "/DELAYLOAD:cuda.dll")
-    # Large address space / stack not required for OptiX; keep defaults.
+    target_link_options(Rstr2Core PRIVATE "/DELAYLOAD:nvcuda.dll")
 endif()
