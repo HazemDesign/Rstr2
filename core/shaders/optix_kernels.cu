@@ -6,6 +6,11 @@
 // bound by the pipeline as the launch-parameter variable ("params"). The
 // per-ray color is carried in three 32-bit payload registers (p0..p2) to stay
 // correct on 64-bit platforms (a pointer would not fit in one register).
+//
+// NOTE: We deliberately avoid CUDA's built-in float3 operators and the
+// vector overloads of dot/normalize/cross (they are not reliably available
+// when nvcc is forced past its supported host compiler). All vector math is
+// implemented explicitly below.
 
 #include <optix.h>
 #include <cuda_runtime.h>
@@ -24,8 +29,16 @@ static __forceinline__ float3 to_float3(const Vec3F& v) {
     return make_float3(v.x, v.y, v.z);
 }
 
-// CUDA vector types do not provide fabs(float3) nor scalar*float3 / float3+scalar
-// operators, so provide explicit helpers.
+// --- Explicit float3 math (no reliance on CUDA vector operator overloads) ---
+static __forceinline__ float3 vneg(float3 a) {
+    return make_float3(-a.x, -a.y, -a.z);
+}
+static __forceinline__ float3 vadd(float3 a, float3 b) {
+    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+static __forceinline__ float3 vsub(float3 a, float3 b) {
+    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
 static __forceinline__ float3 vabs3(float3 a) {
     return make_float3(fabsf(a.x), fabsf(a.y), fabsf(a.z));
 }
@@ -34,6 +47,18 @@ static __forceinline__ float3 smul(float3 a, float s) {
 }
 static __forceinline__ float3 sadd(float3 a, float s) {
     return make_float3(a.x + s, a.y + s, a.z + s);
+}
+static __forceinline__ float vdot(float3 a, float3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+static __forceinline__ float3 vcross(float3 a, float3 b) {
+    return make_float3(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x);
+}
+static __forceinline__ float3 vnorm(float3 a) {
+    return smul(a, rsqrtf(vdot(a, a)));
 }
 
 extern "C" __global__ void __raygen__rg() {
@@ -55,10 +80,9 @@ extern "C" __global__ void __raygen__rg() {
     float3 right  = to_float3(params.cam_right);
     float3 up     = to_float3(params.cam_up);
 
-    float3 dir = normalize(
-        fwd +
-        smul(right, ndc.x * aspect * params.cam_tan_half_fov_y) +
-        smul(up, ndc.y * params.cam_tan_half_fov_y));
+    float3 dir = vnorm(vadd(vadd(fwd,
+                          smul(right, ndc.x * aspect * params.cam_tan_half_fov_y)),
+                          smul(up, ndc.y * params.cam_tan_half_fov_y)));
 
     unsigned int p0 = __float_as_uint(0.0f);
     unsigned int p1 = __float_as_uint(0.0f);
@@ -97,15 +121,15 @@ extern "C" __global__ void __closesthit__ch() {
     float3 p2 = to_float3(v[i2]);
 
     // Geometric normal (vertices already world space).
-    float3 N = normalize(cross(p1 - p0, p2 - p0));
+    float3 N = vnorm(vcross(vsub(p1, p0), vsub(p2, p0)));
     float3 rd = optixGetWorldRayDirection();
-    if (dot(N, rd) > 0.0f) N = -N; // face the camera
+    if (vdot(N, rd) > 0.0f) N = vneg(N); // face the camera
 
     // Phase 3 shading: normal-tinted base + fixed key light.
     // (Many lights / ReSTIR DI arrive in a later phase.)
     float3 base = sadd(smul(vabs3(N), 0.55f), 0.20f);
-    float3 lightDir = normalize(make_float3(0.4f, 0.8f, -0.3f));
-    float ndl = fmaxf(dot(N, lightDir), 0.0f);
+    float3 lightDir = vnorm(make_float3(0.4f, 0.8f, -0.3f));
+    float ndl = fmaxf(vdot(N, lightDir), 0.0f);
     float3 color = smul(base, 0.25f + 0.75f * ndl);
 
     optixSetPayload_0(__float_as_uint(color.x));
