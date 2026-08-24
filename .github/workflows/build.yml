@@ -14,7 +14,7 @@ jobs:
       - name: Install CUDA toolkit (nvcc)
         uses: Jimver/cuda-toolkit@v0.2.16
         with:
-          cuda: '12.8.0'
+          cuda: '12.5.0'
 
       - name: Fetch OptiX 9.0 headers (NVIDIA/optix-dev)
         shell: pwsh
