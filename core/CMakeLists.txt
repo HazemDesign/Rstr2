@@ -68,7 +68,8 @@ endif()
 add_executable(Rstr2Core
     src/main.cpp
     src/shared_mem.cpp
-    src/renderer.cpp)
+    src/renderer.cpp
+    src/agility_sdk.cpp)
 
 set_target_properties(Rstr2Core PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>)
@@ -96,14 +97,17 @@ if(DEFINED ENV{AGILITY_SDK_DIR} AND NOT "$ENV{AGILITY_SDK_DIR}" STREQUAL "")
     target_include_directories(Rstr2Core PRIVATE
         ${AGILITY_SDK_DIR}/include
         ${AGILITY_SDK_DIR}/include/d3dx12)
+    target_compile_definitions(Rstr2Core PRIVATE RSTR2_AGILITY_SDK)
     add_custom_command(TARGET Rstr2Core POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                $<TARGET_FILE_DIR:Rstr2Core>/D3D12
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${AGILITY_SDK_DIR}/bin/x64/D3D12Core.dll
-                $<TARGET_FILE_DIR:Rstr2Core>/D3D12Core.dll
+                $<TARGET_FILE_DIR:Rstr2Core>/D3D12/D3D12Core.dll
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${AGILITY_SDK_DIR}/bin/x64/d3d12SDKLayers.dll
-                $<TARGET_FILE_DIR:Rstr2Core>/d3d12SDKLayers.dll
-        COMMENT "Copying Agility SDK D3D12Core.dll + d3d12SDKLayers.dll next to Rstr2Core.exe")
+                $<TARGET_FILE_DIR:Rstr2Core>/D3D12/d3d12SDKLayers.dll
+        COMMENT "Copying Agility SDK D3D12Core.dll + d3d12SDKLayers.dll into D3D12/ subfolder")
 endif()
 
 if(WIN32)

@@ -91,5 +91,5 @@ jobs:
           path: |
             build/Release/Rstr2Core.exe
             build/Release/raytracing.cso
-            build/Release/D3D12Core.dll
-            build/Release/d3d12SDKLayers.dll
+            build/Release/D3D12/D3D12Core.dll
+            build/Release/D3D12/d3d12SDKLayers.dll
