@@ -343,8 +343,10 @@ extern "C" __global__ void __raygen__rg_shade() {
     // Uniform world/environment ambient on surfaces (approximation).
     float3 ambient = make_f3(0.0f, 0.0f, 0.0f);
     if (params.world_strength > 0.0f) {
-        ambient = albedo * params.world_strength *
-                  make_float3(params.world_r, params.world_g, params.world_b);
+        float ws = params.world_strength;
+        ambient = make_float3(albedo.x * ws * params.world_r,
+                              albedo.y * ws * params.world_g,
+                              albedo.z * ws * params.world_b);
     }
 
     uint32_t NL = params.light_count;
