@@ -96,9 +96,9 @@ extern "C" __global__ void __miss__ms() {
 extern "C" __global__ void __closesthit__ch() {
     uint32_t rt = optixGetPayload_0();
     if (rt == 1u) {
-        // Shadow ray hit geometry -> occluded.
+        // Shadow ray hit geometry -> occluded. Returning from the closest-hit
+        // program ends the ray (no any-hit program is used for shadows).
         optixSetPayload_1(0u);
-        optixTerminateRay();
         return;
     }
 
