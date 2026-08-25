@@ -58,18 +58,6 @@ static __device__ __forceinline__ float3 v3(const rstr2::Vec3F& v) {
     return make_float3(v.x, v.y, v.z);
 }
 
-// Narkowicz ACES filmic approximation, then sRGB gamma encode.
-static __device__ __forceinline__ float3 tonemap(const float3& x) {
-    const float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
-    float3 t = make_float3(
-        (x.x * (a * x.x + b)) / (x.x * (c * x.x + d) + e),
-        (x.y * (a * x.y + b)) / (x.y * (c * x.y + d) + e),
-        (x.z * (a * x.z + b)) / (x.z * (c * x.z + d) + e));
-    return make_float3(powf(fmaxf(t.x, 0.0f), 1.0f / 2.2f),
-                       powf(fmaxf(t.y, 0.0f), 1.0f / 2.2f),
-                       powf(fmaxf(t.z, 0.0f), 1.0f / 2.2f));
-}
-
 // ---- RNG -------------------------------------------------------------------
 static __device__ __forceinline__ uint32_t rng_next(uint32_t& s) {
     s = s * 1664525u + 1013904223u;
@@ -94,6 +82,14 @@ static __device__ __forceinline__ uint32_t pixel_seed(unsigned int pidx,
 #define LIGHT_SUN   1u
 #define LIGHT_SPOT  2u
 #define LIGHT_AREA  3u
+
+// Uniform direction on the unit sphere (Marsaglia via rejection-free z<->1).
+static __device__ __forceinline__ float3 rand_unit_vec(uint32_t& seed) {
+    float z = rng_f(seed) * 2.0f - 1.0f;
+    float a = rng_f(seed) * 6.2831853f;
+    float r = sqrtf(fmaxf(1.0f - z * z, 0.0f));
+    return make_float3(r * cosf(a), r * sinf(a), z);
+}
 
 // Spot cone falloff: smoothstep between cos_outer and cos_inner evaluated at
 // the cosine between the light's emission axis and the emission direction at
@@ -120,8 +116,19 @@ static __device__ void sample_light(const rstr2::Light& L, const float3& P,
                                     float& G) {
     uint32_t type = (uint32_t)(L.type + 0.5f);
     if (type == LIGHT_SUN) {
-        // Directional: every surface point sees the same direction (-dir).
+        // Directional. size_x carries Blender's sun `angle` (radians): jitter
+        // the direction inside that cone for soft shadows.
         Ld = normalize3(make_f3(-L.dx, -L.dy, -L.dz));
+        if (L.size_x > 0.0f) {
+            float3 t1 = normalize3(cross3(Ld, fabsf(Ld.z) < 0.9f
+                                                ? make_f3(0.0f, 0.0f, 1.0f)
+                                                : make_f3(1.0f, 0.0f, 0.0f)));
+            float3 t2 = cross3(Ld, t1);
+            float ang = L.size_x * 0.5f * rng_f(seed);
+            float phi = rng_f(seed) * 6.2831853f;
+            Ld = normalize3(Ld + (t1 * (cosf(phi)) + t2 * sinf(phi))
+                                      * tanf(ang));
+        }
         dist = 1e8f;
         sp = P + Ld;
         float ndl = fmaxf(dot3(N, Ld), 0.0f);
@@ -138,6 +145,12 @@ static __device__ void sample_light(const rstr2::Light& L, const float3& P,
         float3 ax = normalize3(make_f3(L.ax, L.ay, L.az));
         float3 ay = cross3(dir, ax);   // unit (dir _|_ ax)
         sp = lp + ax * (u * L.size_x) + ay * (v * L.size_y);
+    } else if (type == LIGHT_SPOT && L.az > 0.0f) {
+        // Blender spot: az carries shadow_soft_size -> spherical source.
+        sp = lp + rand_unit_vec(seed) * L.az;
+    } else if (type == LIGHT_POINT && L.ax > 0.0f) {
+        // Blender point light: ax carries shadow_soft_size.
+        sp = lp + rand_unit_vec(seed) * L.ax;
     } else {
         sp = lp;                        // point & spot: fixed position
     }
@@ -158,8 +171,10 @@ static __device__ __forceinline__ float3 camera_ray(float px, float py) {
     float u = (px + 0.5f + params.jitter_x) / (float)params.width;
     float v = (py + 0.5f + params.jitter_y) / (float)params.height;
     float aspect = (float)params.width / (float)params.height;
-    float uvx = (2.0f * u - 1.0f) * params.cam_tan_half_fov_y * aspect;
-    float uvy = (1.0f - 2.0f * v) * params.cam_tan_half_fov_y; // row 0 = top
+    float uvx = (2.0f * u - 1.0f) * params.cam_tan_half_fov_y * aspect
+              + params.cam_shift_x * 2.0f * params.cam_tan_half_fov_y * aspect;
+    float uvy = (1.0f - 2.0f * v) * params.cam_tan_half_fov_y
+              + params.cam_shift_y * 2.0f * params.cam_tan_half_fov_y; // row 0 = top
     float3 dir = v3(params.cam_forward) + v3(params.cam_right) * uvx + v3(params.cam_up) * uvy;
     return normalize3(dir);
 }
@@ -247,7 +262,9 @@ static __device__ __forceinline__ void accumulate_and_present(
                              prev.z + (c.z - prev.z) * a);
     accBuf[pidx] = make_float4(acc.x, acc.y, acc.z, out_alpha);
 
-    float3 disp = tonemap(acc * params.exposure);
+    // LINEAR scene-referred output: exposure only. Display transform
+    // (Standard/Filmic/AgX) is applied by Blender's color management.
+    float3 disp = acc * params.exposure;
     float4* img = (float4*)params.image;
     img[pidx] = make_float4(disp.x, disp.y, disp.z, out_alpha);
 }

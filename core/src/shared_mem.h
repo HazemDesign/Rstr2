@@ -80,6 +80,7 @@ struct SceneData {
     float cam_up[3] = {0, 1, 0};
     float cam_forward[3] = {0, 0, 1};
     float cam_tan_half_fov_y = 0.5f;
+    float cam_shift[2] = {0, 0};       // Blender camera shift_x/shift_y
 };
 
 #pragma pack(push, 4)

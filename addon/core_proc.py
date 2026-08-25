@@ -4,6 +4,7 @@
 # spawns it headless. All failures are swallowed so the addon keeps working
 # with its test pattern when the core is unavailable.
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -14,26 +15,40 @@ DEFAULT_WIDTH = 960
 DEFAULT_HEIGHT = 540
 
 
-def core_exe_path():
-    """Return the path to Rstr2Core.exe, or None if it is missing."""
+def _candidate_dirs():
+    """Directories that may contain Rstr2Core.exe, most specific first."""
+    here = Path(__file__).resolve().parent
+    out = []
+    # 1. bin/ inside the installed addon package itself.
+    out.append(here / "bin")
+    # 2. Repo layout: <repo>/bin next to the addon folder.
+    out.append(here.parent / "bin")
+    # 3. Explicit override.
+    env = os.environ.get("RSTR2_CORE_BIN")
+    if env:
+        out.append(Path(env))
+    return out
+
+
+def _find_core(filename):
     try:
-        p = Path(__file__).resolve().parents[1] / "bin" / "Rstr2Core.exe"
-        if p.is_file():
-            return p
+        for d in _candidate_dirs():
+            p = d / filename
+            if p.is_file():
+                return str(p)
     except Exception:
         pass
     return None
+
+
+def core_exe_path():
+    """Return the path to Rstr2Core.exe, or None if it is missing."""
+    return _find_core("Rstr2Core.exe")
 
 
 def core_ptx_path():
     """Return the path to optix_kernels.ptx next to Rstr2Core.exe, or None."""
-    try:
-        p = Path(__file__).resolve().parents[1] / "bin" / "optix_kernels.ptx"
-        if p.is_file():
-            return p
-    except Exception:
-        pass
-    return None
+    return _find_core("optix_kernels.ptx")
 
 
 class CoreProcess:

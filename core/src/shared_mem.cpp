@@ -172,6 +172,11 @@ bool SceneMem::consistent_copy(SceneData& out) {
         memcpy(size, hdr->reserved + 16, sizeof(size));
         out.render_width = size[0];
         out.render_height = size[1];
+
+        float shift[2];
+        memcpy(shift, hdr->reserved + 24, sizeof(shift));
+        out.cam_shift[0] = shift[0];
+        out.cam_shift[1] = shift[1];
     }
 
     for (int i = 0; i < 3; ++i) {

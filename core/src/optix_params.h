@@ -67,6 +67,8 @@ struct Params {
     Vec3F         cam_up;
     Vec3F         cam_forward;
     float         cam_tan_half_fov_y;
+    float         cam_shift_x;      // Blender camera shift_x (sensor units)
+    float         cam_shift_y;
     uint64_t      handle;           // OptixTraversableHandle (single GAS)
 
     // --- RTXDI (ReSTIR DI direct lighting) state ---

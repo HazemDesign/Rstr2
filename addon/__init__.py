@@ -11,7 +11,7 @@
 bl_info = {
     "name": "Rstr2",
     "author": "you",
-    "version": (0, 4, 0),
+    "version": (0, 5, 0),
     "blender": (4, 0, 0),
     "location": "Render Properties > Render Engine > Rstr2",
     "description": "Custom RT renderer (OptiX + ReSTIR DI: typed lights, "
@@ -60,7 +60,7 @@ def _resize_nearest(arr, width, height):
     return arr[np.ix_(ys, xs)]
 
 
-def _extract_scene(depsgraph, view_override=None):
+def _extract_scene(depsgraph, view_override=None, target_aspect=16.0 / 9.0):
     """Build (vertices, indices, camera, lights, albedos) for the native core.
 
     vertices : (n, 3) float32, world-space triangle-soup vertices
@@ -75,6 +75,7 @@ def _extract_scene(depsgraph, view_override=None):
     view_override: optional dict with origin/right/up/forward/tan_half_fov_y
     describing the actual 3D viewport viewpoint (orbit/pan/zoom), used instead
     of the scene camera so free navigation renders what you see.
+    target_aspect: w/h of the render target, for horizontal-sensor-fit cameras.
 
     Returns None when the scene has no mesh geometry (so the core keeps its
     last/ default scene instead of failing on an empty update).
@@ -101,16 +102,35 @@ def _extract_scene(depsgraph, view_override=None):
         up = (float(mw[0][1]), float(mw[1][1]), float(mw[2][1]))
         back = (float(mw[0][2]), float(mw[1][2]), float(mw[2][2]))
         forward = (-back[0], -back[1], -back[2])
+
         cd = camera.data
-        fov_y = getattr(cd, "angle_y", None)
-        if fov_y is None:
-            fov_y = cd.angle
+        lens = max(float(getattr(cd, "lens", 50.0)), 1e-4)
+        fit = getattr(cd, "sensor_fit", "AUTO")
+        sw = float(getattr(cd, "sensor_width", 36.0))
+        sh = float(getattr(cd, "sensor_height", 24.0))
+        if fit == "VERTICAL":
+            tan_v = (sh * 0.5) / lens
+        elif fit == "HORIZONTAL":
+            tan_h = (sw * 0.5) / lens
+            tan_v = tan_h / max(target_aspect, 1e-4)
+        else:  # AUTO: vertical fit unless the target is taller than wide
+            if target_aspect >= 1.0:
+                tan_v = (sh * 0.5) / lens
+            else:
+                tan_v = ((sw * 0.5) / lens) / max(target_aspect, 1e-4)
+
+        # Camera frame offsets (Blender shift units of the largest sensor dim).
+        sx = float(getattr(cd, "shift_x", 0.0))
+        sy = float(getattr(cd, "shift_y", 0.0))
+
         cam = {
             "origin": origin,
             "right": right,
             "up": up,
             "forward": forward,
-            "tan_half_fov_y": math.tan(float(fov_y) / 2.0),
+            "tan_half_fov_y": tan_v,
+            "shift_x": sx,
+            "shift_y": sy,
         }
 
     # --- World-space triangle soup from all MESH objects -----------------
@@ -194,7 +214,7 @@ def _extract_scene(depsgraph, view_override=None):
             intensity = energy * 3.0  # sun strength ~ irradiance; brighten a touch
             row = [pos[0], pos[1], pos[2], 1.0,
                    fwd[0], fwd[1], fwd[2], intensity,
-                   cr, cg, cb, 0.0, 0.0,
+                   cr, cg, cb, float(getattr(ld, "angle", 0.0)), 0.0,
                    0.0, 0.0, 0.0]
         elif ltype == "SPOT":
             spot_size = float(getattr(ld, "spot_size", 0.8))
@@ -202,10 +222,11 @@ def _extract_scene(depsgraph, view_override=None):
             cos_outer = math.cos(spot_size * 0.5)
             cos_inner = math.cos(spot_size * 0.5 * max(1.0 - blend, 0.001))
             intensity = energy * 0.1
+            # az carries shadow_soft_size (spherical emitter radius).
             row = [pos[0], pos[1], pos[2], 2.0,
                    fwd[0], fwd[1], fwd[2], intensity,
                    cr, cg, cb, cos_outer, cos_inner,
-                   0.0, 0.0, 0.0]
+                   0.0, 0.0, float(getattr(ld, "shadow_soft_size", 0.0))]
         elif ltype == "AREA":
             size_x = float(getattr(ld, "size", 1.0))
             shape = getattr(ld, "shape", "SQUARE")
@@ -226,10 +247,11 @@ def _extract_scene(depsgraph, view_override=None):
                    ax[0], ax[1], ax[2]]
         else:  # POINT (default)
             intensity = energy * 0.1  # scale Blender energy into our radiance range
+            # ax carries shadow_soft_size (spherical emitter radius).
             row = [pos[0], pos[1], pos[2], 0.0,
                    0.0, 0.0, 0.0, intensity,
                    cr, cg, cb, 0.0, 0.0,
-                   0.0, 0.0, 0.0]
+                   float(getattr(ld, "shadow_soft_size", 0.0)), 0.0, 0.0]
         light_rows.append(row)
 
     lights = (np.array(light_rows, dtype=np.float32).reshape(-1, 16)
@@ -426,10 +448,13 @@ class Rstr2Engine(RenderEngine):
             live = False
 
         if live:
-            status = "Rstr2: live core | " + self._dbg
+            status = "Rstr2 v%s | live core | %s" % (
+                ".".join(str(x) for x in bl_info["version"]), self._dbg)
         else:
             pixels = _make_test_pattern(width, height)
-            status = "Rstr2: waiting | " + self._core_msg + " | " + self._dbg
+            status = "Rstr2 v%s | waiting | %s | %s" % (
+                ".".join(str(x) for x in bl_info["version"]),
+                self._core_msg, self._dbg)
 
         self.update_stats("", status)
 
@@ -451,15 +476,21 @@ class Rstr2Engine(RenderEngine):
         batch = GPUBatch(type="TRI_FAN", buf=vbo)
 
         gpu.state.blend_set("ALPHA_PREMULT")
-        shader.uniform_sampler("image", texture)
-        batch.draw(shader)
+        # Route the LINEAR framebuffer through Blender's own color management
+        # (scene view transform: Standard / Filmic / AgX + exposure) instead of
+        # baking a display transform into the renderer.
+        try:
+            self.bind_display_space_shader(depsgraph.scene)
+            shader.uniform_sampler("image", texture)
+            batch.draw(shader)
+            self.unbind_display_space_shader()
+        except Exception:
+            shader.uniform_sampler("image", texture)
+            batch.draw(shader)
         gpu.state.blend_set("NONE")
 
         # Keep redrawing while the engine is active so the live feed updates.
         self.tag_redraw()
-
-        # TODO(Phase 2): wrap this in bind_display_space_shader(scene)/unbind
-        # once we display real linear output from the native core.
 
 
     # ------------------------------------------------------------------
@@ -566,7 +597,9 @@ class Rstr2Engine(RenderEngine):
 
     def _sync_scene(self, depsgraph, view_override=None):
         """Extract meshes + camera from the depsgraph and publish to the core."""
-        scene = _extract_scene(depsgraph, view_override)
+        tw, th = getattr(self, "_target_size", None) or (0, 0)
+        aspect = (float(tw) / float(th)) if (tw and th) else (16.0 / 9.0)
+        scene = _extract_scene(depsgraph, view_override, aspect)
         if scene is None:
             self._dbg = "no mesh"
             return
@@ -576,8 +609,7 @@ class Rstr2Engine(RenderEngine):
         try:
             vertices, indices, camera, lights, albedos = scene
 
-            # Scene-level render settings (blRstr-parity panel + film).
-            sprops = getattr(depsgraph.scene, "rstr2", None)
+            # Scene-level render settings (blRstr-parity panel + film).            sprops = getattr(depsgraph.scene, "rstr2", None)
             sflags = 1 if getattr(sprops, "use_taa", True) else 0
             if getattr(depsgraph.scene.render, "film_transparent", False):
                 sflags |= 2  # FLAG_FILM_TRANSPARENT

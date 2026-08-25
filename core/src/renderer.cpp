@@ -488,6 +488,8 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     p.cam_up     = { scene_.cam_up[0],     scene_.cam_up[1],     scene_.cam_up[2] };
     p.cam_forward= { scene_.cam_forward[0],scene_.cam_forward[1],scene_.cam_forward[2] };
     p.cam_tan_half_fov_y = scene_.cam_tan_half_fov_y;
+    p.cam_shift_x = scene_.cam_shift[0];
+    p.cam_shift_y = scene_.cam_shift[1];
     p.handle = im->traversable;
 
     // RTXDI state.

@@ -245,10 +245,13 @@ class SceneWriter:
             hdr.exposure = ctypes.c_float(sexposure)
             hdr.taa_history = ctypes.c_float(shistory)
             # Reserved-area addendum: world color+strength (4 floats), then
-            # requested render width/height (2 uint32).
+            # requested render width/height (2 uint32), camera shift (2 floats).
             struct.pack_into("<4f", hdr.reserved, 0,
                              sworld[0], sworld[1], sworld[2], sworld[3])
             struct.pack_into("<2I", hdr.reserved, 16, ssize[0], ssize[1])
+            struct.pack_into("<2f", hdr.reserved, 24,
+                             float(camera.get("shift_x", 0.0)),
+                             float(camera.get("shift_y", 0.0)))
             for i in range(3):
                 hdr.cam_origin[i] = camera["origin"][i]
                 hdr.cam_right[i] = camera["right"][i]
