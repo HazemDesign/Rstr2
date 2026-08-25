@@ -169,11 +169,17 @@ class SceneWriter:
 
             abuf = b""
             abytes = 0
+            # NOTE: the core unconditionally expects one rgb triple per vertex
+            # after the lights, so we ALWAYS publish the block - substituting
+            # the kernel's default albedo when the caller gave none.
             if albedos is not None and albedos.size:
                 arows = np.ascontiguousarray(albedos, dtype=np.float32).reshape(-1, 3)
-                if int(arows.shape[0]) == vcount:
-                    abuf = arows.ravel().tobytes()
-                    abytes = len(abuf)
+                if int(arows.shape[0]) != vcount:
+                    arows = np.full((vcount, 3), (0.8, 0.8, 0.82), dtype=np.float32)
+            else:
+                arows = np.full((vcount, 3), (0.8, 0.8, 0.82), dtype=np.float32)
+            abuf = arows.ravel().tobytes()
+            abytes = len(abuf)
 
             sflags = FLAG_TAA
             sexposure = 1.0
