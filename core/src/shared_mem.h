@@ -92,7 +92,7 @@ struct SceneHeader {
     float cam_up[3];
     float cam_forward[3];
     float cam_tan_half_fov_y;
-    uint8_t reserved[kSceneHeaderSize - (9 * 4 + 13 * 4)];
+    uint8_t reserved[kSceneHeaderSize - (9 * 4 + 15 * 4)];
 };
 #pragma pack(pop)
 

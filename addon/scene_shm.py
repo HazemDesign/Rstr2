@@ -90,7 +90,7 @@ class _SceneHeader(ctypes.Structure):
         ("cam_up", ctypes.c_float * 3),
         ("cam_forward", ctypes.c_float * 3),
         ("cam_tan_half_fov_y", ctypes.c_float),
-        ("reserved", ctypes.c_uint8 * (HEADER_SIZE - (9 * 4 + 13 * 4))),
+        ("reserved", ctypes.c_uint8 * (HEADER_SIZE - (9 * 4 + 15 * 4))),
     ]
 
 
