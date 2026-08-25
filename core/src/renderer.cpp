@@ -73,10 +73,12 @@ static void optix_log_cb(unsigned int level, const char* tag,
 // the addon scene bridge.
 SceneData make_default_scene() {
     SceneData s;
+    // Huge triangle (test geometry): spans the whole view so a working GAS
+    // must produce a fully-lit frame.
     s.vertices = {
-        -0.7f, -0.5f, 0.0f,
-         0.7f, -0.5f, 0.0f,
-         0.0f,  0.7f, 0.0f,
+        -10.0f, -10.0f, 0.0f,
+         10.0f, -10.0f, 0.0f,
+          0.0f,  10.0f, 0.0f,
     };
     s.indices = {0, 1, 2};
     s.cam_origin[0] = 0.0f; s.cam_origin[1] = 0.6f; s.cam_origin[2] = -2.2f;
