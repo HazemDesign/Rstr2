@@ -95,6 +95,7 @@ extern "C" __global__ void __raygen__rg() {
         params.handle,
         origin, dir,
         0.001f, 1e16f, 0.0f,
+        OptixVisibilityMask(255),
         OPTIX_RAY_FLAG_NONE,
         0, 1, 0,
         p0, p1, p2);
@@ -106,10 +107,10 @@ extern "C" __global__ void __raygen__rg() {
 }
 
 extern "C" __global__ void __miss__ms() {
-    // Diagnostic: pure GREEN so a miss is unmistakable.
-    optixSetPayload_0(__float_as_uint(0.0f));
-    optixSetPayload_1(__float_as_uint(0.9f));
-    optixSetPayload_2(__float_as_uint(0.0f));
+    // Near-black background so lit geometry stands out clearly.
+    optixSetPayload_0(__float_as_uint(0.03f));
+    optixSetPayload_1(__float_as_uint(0.04f));
+    optixSetPayload_2(__float_as_uint(0.06f));
 }
 
 extern "C" __global__ void __closesthit__ch() {
@@ -135,8 +136,11 @@ extern "C" __global__ void __closesthit__ch() {
     float3 L = vnorm(make_float3(0.3f, 0.7f, -0.6f));
     float ndl = fmaxf(vdot(N, L), 0.0f);
 
-    // Diagnostic: pure RED so a hit is unmistakable.
-    optixSetPayload_0(__float_as_uint(0.9f));
-    optixSetPayload_1(__float_as_uint(0.0f));
-    optixSetPayload_2(__float_as_uint(0.0f));
+    // Neutral bright base; diffuse term gives readable shading.
+    float3 base = make_float3(0.85f, 0.85f, 0.88f);
+    float3 color = smul(base, 0.25f + 0.75f * ndl);
+
+    optixSetPayload_0(__float_as_uint(color.x));
+    optixSetPayload_1(__float_as_uint(color.y));
+    optixSetPayload_2(__float_as_uint(color.z));
 }
