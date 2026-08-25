@@ -158,7 +158,8 @@ bool SceneMem::consistent_copy(SceneData& out) {
     out.exposure = hdr->exposure;
     out.taa_history = hdr->taa_history;
 
-    // Reserved-area addendum (v2): float world_color[3] + world_strength.
+    // Reserved-area addendum (v2): float world_color[3] + world_strength,
+    // then u32 render_width + render_height (requested frame size).
     {
         float world[4];
         memcpy(world, hdr->reserved, sizeof(world));
@@ -166,6 +167,11 @@ bool SceneMem::consistent_copy(SceneData& out) {
         out.world_color[1] = world[1];
         out.world_color[2] = world[2];
         out.world_strength = world[3];
+
+        uint32_t size[2];
+        memcpy(size, hdr->reserved + 16, sizeof(size));
+        out.render_width = size[0];
+        out.render_height = size[1];
     }
 
     for (int i = 0; i < 3; ++i) {

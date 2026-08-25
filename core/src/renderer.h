@@ -36,6 +36,10 @@ public:
     // structures. Safe to call between frames from the render loop.
     bool set_scene(const SceneData& scene, std::string& error);
 
+    // Reallocate per-pixel buffers for a new frame size (viewport/F12).
+    // Pipeline, SBT and acceleration structures are unaffected.
+    bool resize(int width, int height, std::string& error);
+
     int width() const { return width_; }
     int height() const { return height_; }
 

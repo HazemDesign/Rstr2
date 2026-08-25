@@ -72,6 +72,9 @@ struct SceneData {
     // header's reserved area by v2 writers. strength == 0 => no world light.
     float world_color[3] = {0.05f, 0.05f, 0.05f};
     float world_strength = 0.0f;
+    // Requested render size (viewport/F12). 0 = keep current.
+    uint32_t render_width = 0;
+    uint32_t render_height = 0;
     float cam_origin[3] = {0, 0, 0};
     float cam_right[3] = {1, 0, 0};
     float cam_up[3] = {0, 1, 0};

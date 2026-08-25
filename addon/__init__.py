@@ -60,7 +60,7 @@ def _resize_nearest(arr, width, height):
     return arr[np.ix_(ys, xs)]
 
 
-def _extract_scene(depsgraph):
+def _extract_scene(depsgraph, view_override=None):
     """Build (vertices, indices, camera, lights, albedos) for the native core.
 
     vertices : (n, 3) float32, world-space triangle-soup vertices
@@ -72,14 +72,20 @@ def _extract_scene(depsgraph):
                types: 0 point, 1 sun, 2 spot, 3 area
     albedos  : (n, 3) float32 linear RGB per vertex (from material base color)
 
+    view_override: optional dict with origin/right/up/forward/tan_half_fov_y
+    describing the actual 3D viewport viewpoint (orbit/pan/zoom), used instead
+    of the scene camera so free navigation renders what you see.
+
     Returns None when the scene has no mesh geometry (so the core keeps its
     last/ default scene instead of failing on an empty update).
     """
     import math
 
-    # --- Camera basis from the active camera (or a sensible default) -----
+    # --- Camera basis: viewport override > active camera > default --------
     camera = depsgraph.scene.camera
-    if camera is None:
+    if view_override is not None:
+        cam = dict(view_override)
+    elif camera is None:
         cam = {
             "origin": (0.0, 0.6, -2.2),
             "right": (1.0, 0.0, 0.0),
@@ -236,7 +242,9 @@ def _world_light(scene):
     """Uniform world/environment radiance (r, g, b, strength) or None.
 
     Reads the World's Background node (the common case). Color is converted
-    from sRGB with the same gamma-2.0 approximation used for materials."""
+    from sRGB with the same gamma-2.0 approximation used for materials.
+    If the Color input is linked (env textures etc.) we fall back to white
+    times Strength so strength edits still respond live."""
     try:
         world = scene.world
         if world is None:
@@ -248,9 +256,17 @@ def _world_light(scene):
                 if node.type == "BACKGROUND":
                     inp_c = node.inputs.get("Color")
                     inp_s = node.inputs.get("Strength")
-                    if inp_c is not None and not inp_c.is_linked:
-                        c = inp_c.default_value
-                        color = (float(c[0]), float(c[1]), float(c[2]))
+                    if inp_c is not None:
+                        if not inp_c.is_linked:
+                            c = inp_c.default_value
+                            color = (float(c[0]), float(c[1]), float(c[2]))
+                        else:
+                            src = inp_c.links[0].from_node
+                            if src.type == "RGB" and hasattr(src, "outputs"):
+                                c = src.outputs[0].default_value
+                                color = (float(c[0]), float(c[1]), float(c[2]))
+                            # env/sky textures: keep white; only the uniform
+                            # approximation is supported for now.
                     if inp_s is not None and not inp_s.is_linked:
                         strength = float(inp_s.default_value)
                     break
@@ -324,6 +340,7 @@ class Rstr2Engine(RenderEngine):
         # Try a ready core frame; fall back to the test pattern unchanged.
         pixels = None
         try:
+            self._target_size = (width, height)
             self._sync_scene(depsgraph)
             if self._ensure_core():
                 frame = self._reader.read_frame()
@@ -372,14 +389,20 @@ class Rstr2Engine(RenderEngine):
         height = max(region.height, 2)
 
         # Phase 3: keep the native core fed with the current camera + scene so
-        # orbit/zoom in the viewport reach the renderer live. We only re-publish
-        # when the camera actually moved (or geometry was flagged dirty), which
-        # the SceneWriter then coalesces to avoid needless BVH rebuilds.
+        # orbit/zoom in the viewport reach the renderer live. Re-publish when
+        # anything visible changed (camera, world, lights, settings) - not
+        # just when the camera moved.
         try:
-            cam_sig = self._camera_sig(depsgraph)
-            if self._geom_dirty or cam_sig != self._last_cam_sig:
-                self._sync_scene(depsgraph)
-                self._last_cam_sig = cam_sig
+            self._target_size = (width, height)
+            sig = self._scene_sig(depsgraph)
+            if self._geom_dirty or sig != self._last_cam_sig:
+                view_override = None
+                rv3d = getattr(context, "region_data", None)
+                if (rv3d is not None and
+                        rv3d.view_perspective != 'CAMERA'):
+                    view_override = self._viewport_camera(context, width, height)
+                self._sync_scene(depsgraph, view_override)
+                self._last_cam_sig = sig
                 self._geom_dirty = False
         except Exception as e:
             self._dbg = "sync err: %s" % str(e)[:60]
@@ -442,6 +465,72 @@ class Rstr2Engine(RenderEngine):
     # ------------------------------------------------------------------
     # Phase 3 scene bridge helpers
     # ------------------------------------------------------------------
+    def _viewport_camera(self, context, width, height):
+        """Camera dict from the current 3D viewport orbit (free navigation).
+
+        Blender orbits around view_location at view_distance along -Z of
+        view_rotation; the eye sits one distance behind the pivot. Vertical
+        FOV derives from the viewport lens (36mm horizontal sensor fit)."""
+        import math
+        from mathutils import Vector
+
+        rv3d = getattr(context, "region_data", None)
+        if rv3d is None:
+            return None
+        q = rv3d.view_rotation
+        forward = q @ Vector((0.0, 0.0, -1.0))
+        right = q @ Vector((1.0, 0.0, 0.0))
+        up = q @ Vector((0.0, 1.0, 0.0))
+        pivot = Vector(rv3d.view_location)
+        origin = pivot - forward * float(rv3d.view_distance)
+        lens = 50.0
+        sd = getattr(context, "space_data", None)
+        if sd is not None and getattr(sd, "lens", 0):
+            lens = float(sd.lens)
+        aspect = max(float(width), 1.0) / max(float(height), 1.0)
+        tan_half_v = (18.0 / lens) / aspect   # 36mm sensor -> 18mm half-width
+        return {
+            "origin": tuple(origin),
+            "right": (right.x, right.y, right.z),
+            "up": (up.x, up.y, up.z),
+            "forward": (forward.x, forward.y, forward.z),
+            "tan_half_fov_y": tan_half_v,
+        }
+
+    def _scene_sig(self, depsgraph):
+        """Signature of everything that should trigger a re-publish: camera,
+        world light, render settings and light objects. Compared each redraw
+        so edits like World color/strength reach the core live."""
+        sig = self._camera_sig(depsgraph)
+        extras = []
+        world = _world_light(depsgraph.scene)
+        if world is not None:
+            extras += [round(v, 4) for v in world]
+        sprops = getattr(depsgraph.scene, "rstr2", None)
+        extras += [
+            bool(getattr(sprops, "use_taa", True)),
+            round(float(getattr(sprops, "exposure", 1.0)), 4),
+            int(getattr(sprops, "taa_history", 20)),
+            bool(getattr(depsgraph.scene.render, "film_transparent", False)),
+        ]
+        lights = []
+        for obj in depsgraph.objects:
+            if obj.type != "LIGHT":
+                continue
+            mw = obj.matrix_world
+            lights += [
+                round(float(mw[0][3]), 3), round(float(mw[1][3]), 3),
+                round(float(mw[2][3]), 3),
+                str(obj.data.type),
+                round(float(getattr(obj.data, "energy", 0)), 2),
+                round(float(getattr(obj.data, "color", (0, 0, 0))[0]), 3),
+                round(float(getattr(obj.data, "color", (0, 0, 0))[1]), 3),
+                round(float(getattr(obj.data, "color", (0, 0, 0))[2]), 3),
+                round(float(getattr(obj.data, "spot_size", 0)), 4),
+                round(float(getattr(obj.data, "size", 0)), 3),
+            ]
+        return sig + tuple(extras + lights)
+
     def _camera_sig(self, depsgraph):
         """Cheap signature of the active camera (basis + vertical FOV).
 
@@ -475,9 +564,9 @@ class Rstr2Engine(RenderEngine):
                 self._scene_writer = None
         return self._scene_writer is not None
 
-    def _sync_scene(self, depsgraph):
+    def _sync_scene(self, depsgraph, view_override=None):
         """Extract meshes + camera from the depsgraph and publish to the core."""
-        scene = _extract_scene(depsgraph)
+        scene = _extract_scene(depsgraph, view_override)
         if scene is None:
             self._dbg = "no mesh"
             return
@@ -496,6 +585,9 @@ class Rstr2Engine(RenderEngine):
                 "flags": sflags,
                 "exposure": float(getattr(sprops, "exposure", 1.0)),
                 "history": float(getattr(sprops, "taa_history", 20)),
+                # Render at the actual target size so the image matches the
+                # viewport outline / F12 resolution (no aspect stretching).
+                "size": list(getattr(self, "_target_size", None) or (0, 0)),
             }
             world = _world_light(depsgraph.scene)
             if world is not None:

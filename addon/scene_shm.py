@@ -150,7 +150,7 @@ class SceneWriter:
         (px,py,pz,type,dx,dy,dz,intensity,cr,cg,cb,size_x,size_y,ax,ay,az);
         albedos: optional (n,3) float32 linear RGB per vertex;
         settings: optional dict {flags:int, exposure:float, history:float,
-        world:[r,g,b,strength] (uniform env light, 0 strength disables)}.
+        world:[r,g,b,strength] (uniform env light), size:[w,h] (render res)}.
         Returns True if published."""
         if self._addr is None:
             return False
@@ -187,6 +187,7 @@ class SceneWriter:
             sexposure = 1.0
             shistory = 20.0
             sworld = (0.0, 0.0, 0.0, 0.0)
+            ssize = (0, 0)
             if settings:
                 sflags = int(settings.get("flags", sflags))
                 sexposure = float(settings.get("exposure", sexposure))
@@ -194,6 +195,9 @@ class SceneWriter:
                 wv = settings.get("world")
                 if wv is not None and len(wv) == 4:
                     sworld = tuple(float(x) for x in wv)
+                sv = settings.get("size")
+                if sv is not None and len(sv) == 2:
+                    ssize = (max(0, int(sv[0])), max(0, int(sv[1])))
 
             vbytes = vcount * 3 * 4
             ibytes = icount * 4
@@ -217,7 +221,7 @@ class SceneWriter:
                 float(camera["tan_half_fov_y"]),
             )
             sig = (vbuf, ibuf, lbuf, abuf, cam_key,
-                   sflags, sexposure, shistory, sworld)
+                   sflags, sexposure, shistory, sworld, ssize)
             if sig == self._last_sig:
                 return True
             self._last_sig = sig
@@ -240,9 +244,11 @@ class SceneWriter:
             hdr.flags = ctypes.c_uint32(sflags)
             hdr.exposure = ctypes.c_float(sexposure)
             hdr.taa_history = ctypes.c_float(shistory)
-            # Reserved-area addendum: world color + strength (4 floats).
+            # Reserved-area addendum: world color+strength (4 floats), then
+            # requested render width/height (2 uint32).
             struct.pack_into("<4f", hdr.reserved, 0,
                              sworld[0], sworld[1], sworld[2], sworld[3])
+            struct.pack_into("<2I", hdr.reserved, 16, ssize[0], ssize[1])
             for i in range(3):
                 hdr.cam_origin[i] = camera["origin"][i]
                 hdr.cam_right[i] = camera["right"][i]

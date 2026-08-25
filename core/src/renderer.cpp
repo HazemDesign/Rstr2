@@ -434,6 +434,37 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
     return true;
 }
 
+bool Renderer::resize(int width, int height, std::string& error) {
+    Impl* im = impl_;
+    if (!im) { error = "Rstr2: renderer not initialized."; return false; }
+    if (width <= 0 || height <= 0 ||
+        (width == width_ && height == height_)) return true;
+
+    rlogf("Rstr2Core: resize %dx%d -> %dx%d", width_, height_, width, height);
+    width_ = width;
+    height_ = height;
+
+    if (im->d_output) cuMemFree(im->d_output);
+    if (im->d_gbuf)   cuMemFree(im->d_gbuf);
+    if (im->d_res[0]) cuMemFree(im->d_res[0]);
+    if (im->d_res[1]) cuMemFree(im->d_res[1]);
+    if (im->d_accum)  cuMemFree(im->d_accum);
+
+    const size_t out_bytes = static_cast<size_t>(width_) * height_ * 16u;
+    im->gbuf_bytes = static_cast<size_t>(width_) * height_ * 3u * 16u;
+    im->res_bytes = static_cast<size_t>(width_) * height_ * sizeof(Reservoir);
+    CU_CHECK(cuMemAlloc(&im->d_output, out_bytes));
+    CU_CHECK(cuMemAlloc(&im->d_gbuf, im->gbuf_bytes));
+    CU_CHECK(cuMemAlloc(&im->d_res[0], im->res_bytes));
+    CU_CHECK(cuMemAlloc(&im->d_res[1], im->res_bytes));
+    CU_CHECK(cuMemAlloc(&im->d_accum, out_bytes));
+    // Fresh temporal state for the new resolution.
+    CU_CHECK(cuMemsetD8(im->d_res[0], 0, im->res_bytes));
+    CU_CHECK(cuMemsetD8(im->d_res[1], 0, im->res_bytes));
+    CU_CHECK(cuMemsetD8(im->d_accum, 0, out_bytes));
+    return true;
+}
+
 bool Renderer::render_frame(float* out_pixels, std::string& error) {
     Impl* im = impl_;
     if (!im || !im->optix_ctx) { error = "Rstr2: renderer not initialized."; return false; }

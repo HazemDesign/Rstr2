@@ -73,8 +73,14 @@ unsigned __stdcall worker_main(void* param) {
     WorkerArgs* a = static_cast<WorkerArgs*>(param);
     rlogf("Rstr2Core: worker thread started (3GB stack)\n");
 
-    const size_t pixel_bytes = static_cast<size_t>(a->width) * static_cast<size_t>(a->height) * 16u;
+    // The frame mapping is sized for the largest resolution the addon may
+    // request (viewport / F12 sizes arrive dynamically via scene updates).
+    const uint32_t max_w = (a->width > 2048) ? (uint32_t)a->width : 2048u;
+    const uint32_t max_h = (a->height > 1280) ? (uint32_t)a->height : 1280u;
+    const size_t pixel_bytes = static_cast<size_t>(max_w) * max_h * 16u;
     const size_t shm_size = 256 + pixel_bytes;
+    rlogf("Rstr2Core: frame shm max %ux%u (%zu KB)\n",
+                 max_w, max_h, shm_size / 1024u);
 
     rstr2::SharedMem shm(a->shm_name, shm_size);
     if (!shm.valid()) {
@@ -96,7 +102,8 @@ unsigned __stdcall worker_main(void* param) {
     // once it appears and poll it for updates each frame.
     rstr2::SceneMem scene(L"Local\\Rstr2Scene_v1");
 
-    std::vector<float> pixels(static_cast<size_t>(a->width) * static_cast<size_t>(a->height) * 4u);
+    std::vector<float> pixels(static_cast<size_t>(max_w) * max_h * 4u);
+    int cur_w = a->width, cur_h = a->height;
 
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
     rlogf("Rstr2Core: rendering %dx%d, waiting for scene/ctrl-c\n", a->width, a->height);
@@ -108,6 +115,21 @@ unsigned __stdcall worker_main(void* param) {
             if (scene.read_scene(sd)) {
                 rlogf("Rstr2Core: scene received v=%u i=%u\n",
                              (unsigned)sd.vertices.size() / 3u, (unsigned)sd.indices.size());
+                // Viewport/F12 requested size, clamped to the shm capacity.
+                if (sd.render_width && sd.render_height) {
+                    int rw = (sd.render_width > max_w) ? (int)max_w : (int)sd.render_width;
+                    int rh = (sd.render_height > max_h) ? (int)max_h : (int)sd.render_height;
+                    rw = (rw < 16) ? 16 : rw;
+                    rh = (rh < 16) ? 16 : rh;
+                    if (rw != cur_w || rh != cur_h) {
+                        if (!renderer.resize(rw, rh, err)) {
+                            rlogf("Rstr2Core: resize failed: %s\n", err.c_str());
+                        } else {
+                            cur_w = rw;
+                            cur_h = rh;
+                        }
+                    }
+                }
                 std::string se;
                 if (!renderer.set_scene(sd, se)) {
                     rlogf("Rstr2Core: set_scene failed: %s\n", se.c_str());
@@ -119,7 +141,7 @@ unsigned __stdcall worker_main(void* param) {
         if (!renderer.render_frame(pixels.data(), re)) {
             rlogf("Rstr2Core: render failed: %s\n", re.c_str());
         } else {
-            shm.publish_frame(pixels.data(), a->width, a->height);
+            shm.publish_frame(pixels.data(), cur_w, cur_h);
         }
 
         Sleep(33); // ~30 fps; cheap for a single-bounce triangle soup.
