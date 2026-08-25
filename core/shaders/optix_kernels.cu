@@ -106,10 +106,10 @@ extern "C" __global__ void __raygen__rg() {
 }
 
 extern "C" __global__ void __miss__ms() {
-    // Dark background.
-    optixSetPayload_0(__float_as_uint(0.03f));
-    optixSetPayload_1(__float_as_uint(0.05f));
-    optixSetPayload_2(__float_as_uint(0.09f));
+    // Near-black background so lit geometry stands out clearly.
+    optixSetPayload_0(__float_as_uint(0.02f));
+    optixSetPayload_1(__float_as_uint(0.02f));
+    optixSetPayload_2(__float_as_uint(0.03f));
 }
 
 extern "C" __global__ void __closesthit__ch() {
@@ -124,16 +124,19 @@ extern "C" __global__ void __closesthit__ch() {
     float3 p1 = to_float3(v[i1]);
     float3 p2 = to_float3(v[i2]);
 
-    // Geometric normal (vertices already world space).
+    // Geometric normal (vertices already world space). Flip to face the
+    // incoming ray so the visible side is the lit side.
     float3 N = vnorm(vcross(vsub(p1, p0), vsub(p2, p0)));
     float3 rd = optixGetWorldRayDirection();
-    if (vdot(N, rd) > 0.0f) N = vneg(N); // face the camera
+    if (vdot(N, rd) > 0.0f) N = vneg(N);
 
-    // Phase 3 shading: normal-tinted base + fixed key light.
-    // (Many lights / ReSTIR DI arrive in a later phase.)
-    float3 base = sadd(smul(vabs3(N), 0.55f), 0.20f);
-    float3 lightDir = vnorm(make_float3(0.4f, 0.8f, -0.3f));
-    float ndl = fmaxf(vdot(N, lightDir), 0.0f);
+    // Single key light from the front-top (camera side) so the visible face
+    // is actually lit. (Many lights / ReSTIR DI arrive in a later phase.)
+    float3 L = vnorm(make_float3(0.3f, 0.7f, -0.6f));
+    float ndl = fmaxf(vdot(N, L), 0.0f);
+
+    // Neutral bright base; diffuse term gives readable shading.
+    float3 base = make_float3(0.85f, 0.85f, 0.88f);
     float3 color = smul(base, 0.25f + 0.75f * ndl);
 
     optixSetPayload_0(__float_as_uint(color.x));
