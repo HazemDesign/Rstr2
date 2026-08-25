@@ -228,12 +228,14 @@ static __device__ __forceinline__ void accumulate_and_present(
         c.y = fminf(c.y, params.taa_clamp);
         c.z = fminf(c.z, params.taa_clamp);
     }
-    float4 prev = params.accum[pidx];
+    // Same memory layout as Vec4F; reinterpret to use CUDA vector ops.
+    float4* accBuf = (float4*)params.accum;
+    float4 prev = accBuf[pidx];
     float a = params.accum_alpha;
     float3 acc = make_float3(prev.x + (c.x - prev.x) * a,
                              prev.y + (c.y - prev.y) * a,
                              prev.z + (c.z - prev.z) * a);
-    params.accum[pidx] = make_float4(acc.x, acc.y, acc.z, 1.0f);
+    accBuf[pidx] = make_float4(acc.x, acc.y, acc.z, 1.0f);
 
     float3 disp = tonemap(acc * params.exposure);
     float4* img = (float4*)params.image;
