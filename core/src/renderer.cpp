@@ -343,7 +343,7 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
     build_input.triangleArray.flags = &tri_flags;
 
     OptixAccelBuildOptions accel_opts = {};
-    accel_opts.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    accel_opts.buildFlags = OPTIX_BUILD_FLAG_NONE;
     accel_opts.operation = OPTIX_BUILD_OPERATION_BUILD;
 
     OptixAccelBufferSizes gas_sizes;
@@ -364,7 +364,8 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
     im->traversable = handle;
     CU_CHECK(cuStreamSynchronize(im->stream));
 
-    rlogf("Rstr2Core: GAS built (handle=%llu)\n", (unsigned long long)handle);
+    rlogf("Rstr2Core: GAS built (handle=%llu bytes=%zu scratch=%zu)\n",
+          (unsigned long long)handle, im->gas_bytes, im->gas_scratch_bytes);
     return true;
 }
 
