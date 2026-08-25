@@ -136,18 +136,27 @@ bool SceneMem::consistent_copy(SceneData& out) {
     const size_t vbytes = static_cast<size_t>(vcount) * 3u * sizeof(float);
     const size_t ibytes = static_cast<size_t>(icount) * sizeof(uint32_t);
     const uint32_t lcount = hdr->light_count;
-    const size_t lbytes = static_cast<size_t>(lcount) * 8u * sizeof(float);
-    if (vbytes + ibytes + lbytes > kMaxSceneBytes) return false;
+    const size_t lbytes = static_cast<size_t>(lcount) * 16u * sizeof(float);
+    const size_t abytes = static_cast<size_t>(vcount) * 3u * sizeof(float);
+    if (vbytes + ibytes + lbytes + abytes > kMaxSceneBytes) return false;
 
     const uint8_t* base = reinterpret_cast<const uint8_t*>(view_);
     const float* vptr = reinterpret_cast<const float*>(base + kSceneHeaderSize);
-    const uint32_t* iptr = reinterpret_cast<const uint32_t*>(base + kSceneHeaderSize + vbytes);
-    const PointLight* lptr = reinterpret_cast<const PointLight*>(
+    const uint32_t* iptr = reinterpret_cast<const uint32_t*>(
+        base + kSceneHeaderSize + vbytes);
+    const Light* lptr = reinterpret_cast<const Light*>(
         base + kSceneHeaderSize + vbytes + ibytes);
+    const float* aptr = reinterpret_cast<const float*>(
+        base + kSceneHeaderSize + vbytes + ibytes + lbytes);
 
     out.vertices.assign(vptr, vptr + static_cast<size_t>(vcount) * 3u);
     out.indices.assign(iptr, iptr + icount);
     out.lights.assign(lptr, lptr + lcount);
+    out.albedos.assign(aptr, aptr + static_cast<size_t>(vcount) * 3u);
+
+    out.flags = hdr->flags;
+    out.exposure = hdr->exposure;
+    out.taa_history = hdr->taa_history;
 
     for (int i = 0; i < 3; ++i) {
         out.cam_origin[i] = hdr->cam_origin[i];

@@ -1,12 +1,15 @@
-// Rstr2 - OptiX kernel: ReSTIR DI (RTXDI-style direct lighting).
+// Rstr2 - OptiX kernel: ReSTIR DI (RTXDI-style direct lighting) + TAA.
 //
-// Pass 1 (rg_primary): trace the primary ray, write a G-buffer (world pos +
-// normal + hit flag), then build a per-pixel light reservoir by RIS-sampling
-// candidate lights and combining it with the previous frame's reservoir
-// (temporal reuse).
+// Pass 1 (rg_primary): jittered primary ray -> G-buffer (world pos, normal,
+// per-vertex albedo), then build a per-pixel light reservoir by RIS-sampling
+// candidate lights from a typed pool (point / sun / spot / area) and combine
+// it with the previous frame's reservoir (temporal reuse). The exact
+// stochastic light-sample position is carried inside the reservoir so the
+// shading pass evaluates the same sample.
 //
 // Pass 2 (rg_shade): read the G-buffer + reservoir, cast ONE shadow ray for
-// the selected light, and write the lit color.
+// the selected light sample, accumulate linear HDR color temporally
+// (exponential moving average = TAA), then tonemap to the display buffer.
 //
 // The miss/closest-hit programs are shared and branch on the ray-type payload
 // (0 = primary, 1 = shadow).
@@ -54,6 +57,7 @@ static __device__ __forceinline__ float3 normalize3(const float3& a) {
 static __device__ __forceinline__ float3 v3(const rstr2::Vec3F& v) {
     return make_float3(v.x, v.y, v.z);
 }
+
 // Narkowicz ACES filmic approximation, then sRGB gamma encode.
 static __device__ __forceinline__ float3 tonemap(const float3& x) {
     const float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
@@ -76,16 +80,83 @@ static __device__ __forceinline__ float rng_f(uint32_t& s) {
     return (float)(x & 0x00FFFFFFu) / (float)0x01000000u;
 }
 
-static __device__ __forceinline__ uint32_t pixel_seed(unsigned int pidx, unsigned int frame) {
-    uint32_t s = (pidx + 1u) * 9781u + (frame + 1u) * 26699u;
+static __device__ __forceinline__ uint32_t pixel_seed(unsigned int pidx,
+                                                      unsigned int frame,
+                                                      unsigned int salt) {
+    uint32_t s = (pidx + 1u) * 9781u + (frame + 1u) * 26699u + salt * 6271u;
     s ^= s >> 15;
     return s;
 }
 
-// ---- ray generation (shared camera basis) -----------------------------------
-static __device__ __forceinline__ float3 camera_ray(unsigned int px, unsigned int py) {
-    float u = ((float)px + 0.5f) / (float)params.width;
-    float v = ((float)py + 0.5f) / (float)params.height;
+// ---- typed light sampling --------------------------------------------------
+// Light types (must match rstr2::Light doc):
+#define LIGHT_POINT 0u
+#define LIGHT_SUN   1u
+#define LIGHT_SPOT  2u
+#define LIGHT_AREA  3u
+
+// Spot cone falloff: smoothstep between cos_outer and cos_inner evaluated at
+// the cosine between the light's emission axis and the emission direction at
+// the shaded point (-Ld, pointing from light toward surface).
+static __device__ __forceinline__ float spot_factor(const rstr2::Light& L,
+                                                     const float3& Ld) {
+    float cosA = dot3(Ld * -1.0f, normalize3(make_f3(L.dx, L.dy, L.dz)));
+    float co = L.size_x;   // cos(outer half angle)
+    float ci = L.size_y;   // cos(inner half angle)
+    if (ci <= co) return (cosA >= co) ? 1.0f : 0.0f;   // blend == 0 hard edge
+    float t = (cosA - co) / (ci - co);
+    t = fminf(fmaxf(t, 0.0f), 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// Sample one stochastic position on the light. Returns:
+//   sp   - world-space sample position (unused for sun)
+//   Ld   - unit direction from P toward the sample (or toward the sun)
+//   dist - distance to the sample (1e8 for sun)
+//   G    - unshadowed geometry/importance term p_hat used for RIS weights
+static __device__ void sample_light(const rstr2::Light& L, const float3& P,
+                                    const float3& N, uint32_t& seed,
+                                    float3& sp, float3& Ld, float& dist,
+                                    float& G) {
+    uint32_t type = (uint32_t)(L.type + 0.5f);
+    if (type == LIGHT_SUN) {
+        // Directional: every surface point sees the same direction (-dir).
+        Ld = normalize3(make_f3(-L.dx, -L.dy, -L.dz));
+        dist = 1e8f;
+        sp = P + Ld;
+        float ndl = fmaxf(dot3(N, Ld), 0.0f);
+        G = ndl;                      // no distance falloff
+        return;
+    }
+
+    float3 lp = make_f3(L.px, L.py, L.pz);
+    if (type == LIGHT_AREA) {
+        // Uniform random point on the emitting rectangle.
+        float u = rng_f(seed) - 0.5f;
+        float v = rng_f(seed) - 0.5f;
+        float3 dir = normalize3(make_f3(L.dx, L.dy, L.dz));
+        float3 ax = normalize3(make_f3(L.ax, L.ay, L.az));
+        float3 ay = cross3(dir, ax);   // unit (dir _|_ ax)
+        sp = lp + ax * (u * L.size_x) + ay * (v * L.size_y);
+    } else {
+        sp = lp;                        // point & spot: fixed position
+    }
+
+    float3 toL = sp - P;
+    float d2 = dot3(toL, toL);
+    if (d2 < 1e-8f) { toL = N; d2 = 1.0f; }
+    float d = sqrtf(d2);
+    Ld = toL * (1.0f / d);
+    dist = d;
+    float ndl = fmaxf(dot3(N, Ld), 0.0f);
+    G = ndl / fmaxf(d2, 1e-6f);
+    if (type == LIGHT_SPOT) G *= spot_factor(L, Ld);
+}
+
+// ---- camera -----------------------------------------------------------------
+static __device__ __forceinline__ float3 camera_ray(float px, float py) {
+    float u = (px + 0.5f + params.jitter_x) / (float)params.width;
+    float v = (py + 0.5f + params.jitter_y) / (float)params.height;
     float aspect = (float)params.width / (float)params.height;
     float uvx = (2.0f * u - 1.0f) * params.cam_tan_half_fov_y * aspect;
     float uvy = (1.0f - 2.0f * v) * params.cam_tan_half_fov_y; // row 0 = top
@@ -97,7 +168,7 @@ static __device__ __forceinline__ float3 camera_ray(unsigned int px, unsigned in
 extern "C" __global__ void __miss__ms() {
     uint32_t rt = optixGetPayload_0();
     if (rt == 1u) {
-        // Shadow ray reached the light with no occluder -> visible.
+        // Shadow ray reached the sky with no occluder -> visible.
         optixSetPayload_1(1u);
     }
     // Primary miss: nothing to do (G-buffer hit flag stays 0).
@@ -122,7 +193,7 @@ extern "C" __global__ void __closesthit__ch() {
     float  t  = optixGetRayTmax();
     float3 P  = ro + rd * t;
 
-    // Geometric normal from the triangle's world vertices.
+    // Geometric normal + material albedo from the triangle's soup vertices.
     unsigned int prim = optixGetPrimitiveIndex();
     const rstr2::Vec3F* v = params.vertices;
     const unsigned int* idx = params.indices;
@@ -134,9 +205,39 @@ extern "C" __global__ void __closesthit__ch() {
     float3 vc = make_f3(v[i2].x, v[i2].y, v[i2].z);
     float3 ng = normalize3(cross3(vb - va, vc - va));
 
+    // Per-vertex albedo (triangle soup => all 3 verts share the material).
+    float3 alb = make_f3(0.8f, 0.8f, 0.82f);
+    if (params.albedos) {
+        rstr2::Vec3F a = params.albedos[i0];
+        alb = make_f3(a.x, a.y, a.z);
+    }
+
     float4* g = (float4*)params.gbuf;
-    g[2u * pidx]     = make_float4(P.x, P.y, P.z, 1.0f);
-    g[2u * pidx + 1u] = make_float4(ng.x, ng.y, ng.z, 0.0f);
+    g[3u * pidx + 0u] = make_float4(P.x, P.y, P.z, 1.0f);
+    g[3u * pidx + 1u] = make_float4(ng.x, ng.y, ng.z, 0.0f);
+    g[3u * pidx + 2u] = make_float4(alb.x, alb.y, alb.z, 0.0f);
+}
+
+// ---- temporal display accumulation (TAA) ------------------------------------
+static __device__ __forceinline__ void accumulate_and_present(
+    unsigned int pidx, const float3& hdr) {
+    // Firefly clamp before blending (blRstr-style "TAA clamping").
+    float3 c = hdr;
+    if (params.taa_clamp > 0.0f) {
+        c.x = fminf(c.x, params.taa_clamp);
+        c.y = fminf(c.y, params.taa_clamp);
+        c.z = fminf(c.z, params.taa_clamp);
+    }
+    float4 prev = params.accum[pidx];
+    float a = params.accum_alpha;
+    float3 acc = make_float3(prev.x + (c.x - prev.x) * a,
+                             prev.y + (c.y - prev.y) * a,
+                             prev.z + (c.z - prev.z) * a);
+    params.accum[pidx] = make_float4(acc.x, acc.y, acc.z, 1.0f);
+
+    float3 disp = tonemap(acc * params.exposure);
+    float4* img = (float4*)params.image;
+    img[pidx] = make_float4(disp.x, disp.y, disp.z, 1.0f);
 }
 
 // ====================== RAYGEN: primary + reservoir ========================
@@ -146,10 +247,10 @@ extern "C" __global__ void __raygen__rg_primary() {
     unsigned int pidx = idx.x + idx.y * params.width;
 
     float4* g = (float4*)params.gbuf;
-    g[2u * pidx].w = 0.0f; // mark no-hit until closest hit writes it
+    g[3u * pidx].w = 0.0f; // mark no-hit until closest hit writes it
 
     float3 origin = v3(params.cam_origin);
-    float3 dir = camera_ray(idx.x, idx.y);
+    float3 dir = camera_ray((float)idx.x, (float)idx.y);
 
     uint32_t p0 = 0u, p1 = 0u, p2 = 0u, p3 = 0u;
     optixTrace(params.handle, origin, dir, 0.0f, 1e16f, 0.0f,
@@ -158,38 +259,45 @@ extern "C" __global__ void __raygen__rg_primary() {
 
     rstr2::Reservoir r;
     r.wsum = 0.0f; r.lightIdx = 0u; r.M = 0u; r.pad = 0u;
+    r.sx = 0.0f; r.sy = 0.0f; r.sz = 0.0f;
 
-    float4 ph = g[2u * pidx];
+    float4 ph = g[3u * pidx];
     if (ph.w > 0.5f) { // valid surface hit
         float3 P = make_f3(ph.x, ph.y, ph.z);
-        float3 N = make_f3(g[2u * pidx + 1u].x, g[2u * pidx + 1u].y, g[2u * pidx + 1u].z);
+        float3 N = make_f3(g[3u * pidx + 1u].x, g[3u * pidx + 1u].y, g[3u * pidx + 1u].z);
 
         uint32_t NL = params.light_count;
         if (NL > 0u) {
-            uint32_t s = pixel_seed(pidx, params.frame_index);
+            uint32_t s = pixel_seed(pidx, params.frame_index, 1u);
             const int CANDIDATES = 8;
             const uint32_t MAX_M = (1u << 20);
             for (int i = 0; i < CANDIDATES; ++i) {
                 uint32_t li = rng_next(s) % NL;
-                rstr2::PointLight L = params.lights[li];
-                float3 toL = make_f3(L.px, L.py, L.pz) - P;
-                float d2 = dot3(toL, toL);
-                if (d2 < 1e-6f) continue;
-                float d = sqrtf(d2);
-                float3 Ld = toL * (1.0f / d);
-                float ndl = max(dot3(N, Ld), 0.0f);
-                float G = ndl / d2;             // p_hat (geometry term)
-                float wi = (float)NL * G;        // w_i = p_hat / p, p = 1/NL
-                r.wsum += wi;
+                rstr2::Light L = params.lights[li];
+
+                float3 sp, Ld;
+                float dist, G;
+                sample_light(L, P, N, s, sp, Ld, dist, G);
+                if (G <= 0.0f) continue;
+
+                float wi = (float)NL * G;    // w_i = p_hat / p, p = 1/NL
+                float wnew = r.wsum + wi;
+                r.wsum = wnew;
                 r.M += 1u;
-                if (rng_f(s) < wi / max(r.wsum, 1e-12f)) r.lightIdx = li;
+                if (rng_f(s) < wi / fmaxf(wnew, 1e-12f)) {
+                    r.lightIdx = li;
+                    r.sx = sp.x; r.sy = sp.y; r.sz = sp.z;
+                }
             }
 
             // Temporal reuse: combine with previous frame's reservoir.
             rstr2::Reservoir pr = params.prev_reservoirs[pidx];
-            if (pr.M > 0u) {
+            if (pr.M > 0u && pr.lightIdx < NL) {
                 float total = r.wsum + pr.wsum;
-                if (rng_f(s) < pr.wsum / max(total, 1e-12f)) r.lightIdx = pr.lightIdx;
+                if (rng_f(s) < pr.wsum / fmaxf(total, 1e-12f)) {
+                    r.lightIdx = pr.lightIdx;
+                    r.sx = pr.sx; r.sy = pr.sy; r.sz = pr.sz;
+                }
                 r.wsum = total;
                 uint32_t m = pr.M + r.M;
                 r.M = (m > MAX_M) ? MAX_M : m;
@@ -207,56 +315,66 @@ extern "C" __global__ void __raygen__rg_shade() {
     unsigned int pidx = idx.x + idx.y * params.width;
 
     float4* g = (float4*)params.gbuf;
-    float4 ph = g[2u * pidx];
-
-    float3 background = make_f3(0.03f, 0.04f, 0.06f);
-    float4* img = (float4*)params.image;
+    float4 ph = g[3u * pidx];
 
     if (ph.w < 0.5f) {
-        img[pidx] = make_float4(background.x, background.y, background.z, 1.0f);
+        // Background (also accumulated so silhouettes converge smoothly).
+        accumulate_and_present(pidx, make_f3(0.03f, 0.04f, 0.06f));
         return;
     }
 
     float3 P = make_f3(ph.x, ph.y, ph.z);
-    float3 N = make_f3(g[2u * pidx + 1u].x, g[2u * pidx + 1u].y, g[2u * pidx + 1u].z);
+    float3 N = make_f3(g[3u * pidx + 1u].x, g[3u * pidx + 1u].y, g[3u * pidx + 1u].z);
+    float3 albedo = make_f3(g[3u * pidx + 2u].x, g[3u * pidx + 2u].y, g[3u * pidx + 2u].z);
 
     uint32_t NL = params.light_count;
 
     // Fallback shading when no lights are provided (default scene).
     if (NL == 0u) {
-        float3 base = make_f3(0.85f, 0.85f, 0.88f);
+        float3 base = albedo;
         float3 key = normalize3(make_f3(0.3f, 0.7f, -0.6f));
         float ndl = max(dot3(N, key), 0.0f);
         float3 col = base * (0.25f + 0.75f * ndl);
-        float3 mapped = tonemap(col);
-        img[pidx] = make_float4(mapped.x, mapped.y, mapped.z, 1.0f);
+        accumulate_and_present(pidx, col);
         return;
     }
 
     rstr2::Reservoir r = params.reservoirs[pidx];
+    if (r.M == 0u || r.lightIdx >= NL || r.wsum <= 0.0f) {
+        // No usable light sample this frame.
+        accumulate_and_present(pidx, make_f3(0.0f, 0.0f, 0.0f));
+        return;
+    }
     float W = r.wsum / max((float)r.M, 1.0f);
 
-    rstr2::PointLight L = params.lights[r.lightIdx];
-    float3 toL = make_f3(L.px, L.py, L.pz) - P;
-    float d = length3(toL);
-    float3 Ld = (d > 1e-6f) ? toL * (1.0f / d) : make_f3(0.0f, 1.0f, 0.0f);
+    rstr2::Light L = params.lights[r.lightIdx];
+    uint32_t type = (uint32_t)(L.type + 0.5f);
 
-    // Shadow ray toward the selected light.
+    // Shadow ray toward the stored stochastic light sample.
+    float3 Ld;
+    float tmax;
+    if (type == LIGHT_SUN) {
+        Ld = normalize3(make_f3(-L.dx, -L.dy, -L.dz));
+        tmax = 1e8f;
+    } else {
+        float3 sp = make_f3(r.sx, r.sy, r.sz);
+        float3 toS = sp - P;
+        float ds = length3(toS);
+        Ld = (ds > 1e-6f) ? toS * (1.0f / ds) : N;
+        tmax = fmaxf(ds - 2.0f * 1e-3f, 1e-3f);
+    }
+
     uint32_t p0 = 1u, p1 = 0u, p2 = 0u, p3 = 0u;
-    const float EPS = 1e-3f;
-    optixTrace(params.handle, P + N * EPS, Ld, EPS, max(d - 2.0f * EPS, EPS), 0.0f,
+    optixTrace(params.handle, P + N * 1e-3f, Ld, 1e-3f, tmax, 0.0f,
                OptixVisibilityMask(255), OPTIX_RAY_FLAG_NONE,
                0u, 1u, 0u, p0, p1, p2, p3);
-    uint32_t vis = p1;
+    float vis = (float)p1;
 
     float3 Le = make_f3(L.cr, L.cg, L.cb) * L.intensity;
-    float3 albedo = make_f3(0.8f, 0.8f, 0.82f);
     float3 f_r = albedo * (1.0f / 3.14159265f);
-    float vis_f = (float)vis;
-    float3 color = make_float3(W * f_r.x * Le.x * vis_f,
-                               W * f_r.y * Le.y * vis_f,
-                               W * f_r.z * Le.z * vis_f);
+    float3 color = make_float3(W * f_r.x * Le.x * vis,
+                               W * f_r.y * Le.y * vis,
+                               W * f_r.z * Le.z * vis);
 
-    float3 mapped = tonemap(color);
-    img[pidx] = make_float4(mapped.x, mapped.y, mapped.z, 1.0f);
+    accumulate_and_present(pidx, color);
 }

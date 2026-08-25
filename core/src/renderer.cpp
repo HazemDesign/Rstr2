@@ -116,13 +116,17 @@ struct Renderer::Impl {
     CUdeviceptr      d_params       = 0;   // launch params buffer
 
     // RTXDI (ReSTIR DI) state.
-    CUdeviceptr      d_gbuf         = 0;   // 2*N float4: [pos.xyz,hit], [normal.xyz,_]
+    CUdeviceptr      d_gbuf         = 0;   // 3*N float4: [pos,hit],[normal],[albedo]
     CUdeviceptr      d_res[2]        = {0, 0}; // two reservoir buffers (ping-pong)
-    CUdeviceptr      d_lights       = 0;   // point-light pool
+    CUdeviceptr      d_lights       = 0;   // typed-light pool
+    CUdeviceptr      d_albedos      = 0;   // per-vertex rgb (may be null)
+    CUdeviceptr      d_accum        = 0;   // HDR TAA accumulation buffer
     size_t           gbuf_bytes     = 0;
     size_t           res_bytes      = 0;
     size_t           light_bytes    = 0;
+    size_t           albedo_bytes   = 0;
     uint32_t         frame_index    = 0;
+    bool             scene_dirty    = true;
 
     ~Impl() {
         if (d_output)       cuMemFree(d_output);
@@ -136,6 +140,8 @@ struct Renderer::Impl {
         if (d_res[0])       cuMemFree(d_res[0]);
         if (d_res[1])       cuMemFree(d_res[1]);
         if (d_lights)       cuMemFree(d_lights);
+        if (d_albedos)      cuMemFree(d_albedos);
+        if (d_accum)        cuMemFree(d_accum);
         if (pipeline)       optixPipelineDestroy(pipeline);
         if (hitgroup_pg)    optixProgramGroupDestroy(hitgroup_pg);
         if (miss_pg)        optixProgramGroupDestroy(miss_pg);
@@ -303,16 +309,19 @@ bool Renderer::init(int width, int height, std::string& error) {
     CU_CHECK(cuMemAlloc(&impl_->d_output, out_bytes));
     CU_CHECK(cuMemAlloc(&impl_->d_params, sizeof(Params)));
 
-    // G-buffer (2 float4/pixel) + two reservoir ping-pong buffers.
-    const size_t gbuf_bytes = static_cast<size_t>(width) * height * 2u * 16u;
+    // G-buffer (3 float4/pixel) + reservoir ping-pong + TAA accumulation.
+    const size_t gbuf_bytes = static_cast<size_t>(width) * height * 3u * 16u;
     const size_t res_bytes = static_cast<size_t>(width) * height * sizeof(Reservoir);
+    const size_t accum_bytes = static_cast<size_t>(width) * height * 16u;
     CU_CHECK(cuMemAlloc(&impl_->d_gbuf, gbuf_bytes));
     CU_CHECK(cuMemAlloc(&impl_->d_res[0], res_bytes));
     CU_CHECK(cuMemAlloc(&impl_->d_res[1], res_bytes));
+    CU_CHECK(cuMemAlloc(&impl_->d_accum, accum_bytes));
     // Reservoirs must start empty (M=0) so the first frame has no bogus
-    // temporal neighbour.
+    // temporal neighbour; accumulation starts black and fades in.
     CU_CHECK(cuMemsetD8(impl_->d_res[0], 0, res_bytes));
     CU_CHECK(cuMemsetD8(impl_->d_res[1], 0, res_bytes));
+    CU_CHECK(cuMemsetD8(impl_->d_accum, 0, accum_bytes));
     impl_->gbuf_bytes = gbuf_bytes;
     impl_->res_bytes = res_bytes;
 
@@ -358,13 +367,26 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
     CU_CHECK(cuMemcpyHtoD(im->d_indices, scene_.indices.data(), im->idx_bytes));
 
     // Lights (RTXDI candidate pool). Reallocated if the count changed.
-    const size_t lbytes = scene_.lights.size() * sizeof(PointLight);
+    const size_t lbytes = scene_.lights.size() * sizeof(Light);
     if (im->d_lights) { cuMemFree(im->d_lights); im->d_lights = 0; im->light_bytes = 0; }
     if (lbytes > 0) {
         CU_CHECK(cuMemAlloc(&im->d_lights, lbytes));
         CU_CHECK(cuMemcpyHtoD(im->d_lights, scene_.lights.data(), lbytes));
         im->light_bytes = lbytes;
     }
+
+    // Per-vertex albedo (may be absent -> kernel falls back to a default).
+    if (im->d_albedos) { cuMemFree(im->d_albedos); im->d_albedos = 0; im->albedo_bytes = 0; }
+    const size_t abytes = scene_.albedos.size() * sizeof(float);
+    if (abytes > 0 && abytes == im->vert_bytes) {
+        CU_CHECK(cuMemAlloc(&im->d_albedos, abytes));
+        CU_CHECK(cuMemcpyHtoD(im->d_albedos, scene_.albedos.data(), abytes));
+        im->albedo_bytes = abytes;
+    }
+
+    // Any new epoch invalidates temporal history (geometry/camera/lights/
+    // settings changed) -> the next frame resets TAA accumulation.
+    im->scene_dirty = true;
 
     // Build a single triangle-array GAS from the indexed mesh. Disable face
     // culling so geometry is visible regardless of index winding.
@@ -426,6 +448,8 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     p.height = static_cast<unsigned int>(height_);
     p.vertices = reinterpret_cast<Vec3F*>(im->d_vertices);
     p.indices = reinterpret_cast<unsigned int*>(im->d_indices);
+    p.albedos = (im->albedo_bytes > 0)
+        ? reinterpret_cast<Vec3F*>(im->d_albedos) : nullptr;
     p.cam_origin = { scene_.cam_origin[0], scene_.cam_origin[1], scene_.cam_origin[2] };
     p.cam_right  = { scene_.cam_right[0],  scene_.cam_right[1],  scene_.cam_right[2] };
     p.cam_up     = { scene_.cam_up[0],     scene_.cam_up[1],     scene_.cam_up[2] };
@@ -434,12 +458,29 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     p.handle = im->traversable;
 
     // RTXDI state.
-    p.lights = reinterpret_cast<PointLight*>(im->d_lights);
+    p.lights = reinterpret_cast<Light*>(im->d_lights);
     p.light_count = static_cast<unsigned int>(scene_.lights.size());
     p.gbuf = reinterpret_cast<Vec4F*>(im->d_gbuf);
     p.reservoirs = reinterpret_cast<Reservoir*>(im->d_res[cur]);
     p.prev_reservoirs = reinterpret_cast<Reservoir*>(im->d_res[prev]);
     p.frame_index = im->frame_index;
+
+    // TAA / display state. Subpixel jitter from a low-discrepancy frame
+    // sequence; history resets on the first frame after any scene change
+    // (or when TAA is disabled via the addon settings).
+    const bool taa_on = (scene_.flags & kSceneFlagTaa) != 0;
+    auto frac = [](float x) { return x - std::floor(x); };
+    if (taa_on && !im->scene_dirty) {
+        p.jitter_x = frac(im->frame_index * 0.7548776662f) - 0.5f;
+        p.jitter_y = frac(im->frame_index * 0.5698402909f) - 0.5f;
+    }
+    float hist = scene_.taa_history;
+    if (hist < 1.0f) hist = 1.0f;
+    p.accum_alpha = (taa_on && !im->scene_dirty) ? (1.0f / hist) : 1.0f;
+    p.exposure = (scene_.exposure > 0.0f) ? scene_.exposure : 1.0f;
+    p.taa_clamp = 10.0f;   // blRstr-parity default firefly clamp
+    p.accum = reinterpret_cast<Vec4F*>(im->d_accum);
+    im->scene_dirty = false;
 
     CU_CHECK(cuMemcpyHtoD(im->d_params, &p, sizeof(Params)));
 

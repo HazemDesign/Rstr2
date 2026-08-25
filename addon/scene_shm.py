@@ -2,23 +2,35 @@
 #
 # Creates the named mapping "Local\\Rstr2Scene_v1" and publishes the Blender
 # scene (world-space triangle soup + camera basis) that the native core
-# ray-traces. Protocol matches core/src/shared_mem.h exactly:
+# ray-traces. Protocol matches core/src/shared_mem.h exactly (version 2):
 #
 #   Header (256 bytes, little-endian, _pack_=4):
 #     u32 magic        = 0x32525353
-#     u32 version      = 1
+#     u32 version      = 2
 #     u32 epoch        (incremented LAST on each update)
 #     u32 ready        (1 = valid)
 #     u32 writing      (1 while we are mid-update)
 #   u32 vertex_count (xyz triples)
 #   u32 index_count  (uint32 indices)
-#   u32 light_count  (point lights, 8 floats each)
+#   u32 light_count  (typed lights, 16 floats each)
+#   u32 flags        (bit0 = TAA enabled)
+#   float exposure, taa_history
 #   float cam_origin[3], cam_right[3], cam_up[3], cam_forward[3]
 #   float cam_tan_half_fov_y
 #   (padded to 256)
 #   offset 256: vertices  (vertex_count * 3 * float32, world space)
 #   then      : indices   (index_count * uint32)
-#   then      : lights    (light_count * 8 * float32: px,py,pz,intensity,cr,cg,cb,pad)
+#   then      : lights    (light_count * 16 * float32 - see below)
+#   then      : albedos   (vertex_count * 3 * float32, linear RGB per vertex)
+#
+# Typed-light row layout (16 floats / 64 bytes):
+#   [px,py,pz, type,
+#    dx,dy,dz, intensity,
+#    cr,cg,cb, size_x, size_y,
+#    ax,ay,az]
+#   type: 0 point, 1 sun, 2 spot, 3 area.
+#   spot: size_x = cos(outer half angle), size_y = cos(inner half angle).
+#   area: extents along axis (ax..az) and cross(dir, axis).
 
 import ctypes
 import struct
@@ -52,8 +64,10 @@ _CloseHandle.restype = ctypes.c_int
 
 MAPPING_NAME = "Local\\Rstr2Scene_v1"
 MAGIC = 0x32525353
-VERSION = 1
+VERSION = 2
 HEADER_SIZE = 256
+LIGHT_FLOATS = 16
+FLAG_TAA = 1
 MAX_SCENE_BYTES = 64 * 1024 * 1024  # 64 MB cap
 
 
@@ -68,12 +82,15 @@ class _SceneHeader(ctypes.Structure):
         ("vertex_count", ctypes.c_uint32),
         ("index_count", ctypes.c_uint32),
         ("light_count", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("exposure", ctypes.c_float),
+        ("taa_history", ctypes.c_float),
         ("cam_origin", ctypes.c_float * 3),
         ("cam_right", ctypes.c_float * 3),
         ("cam_up", ctypes.c_float * 3),
         ("cam_forward", ctypes.c_float * 3),
         ("cam_tan_half_fov_y", ctypes.c_float),
-        ("reserved", ctypes.c_uint8 * (HEADER_SIZE - (8 * 4 + 13 * 4))),
+        ("reserved", ctypes.c_uint8 * (HEADER_SIZE - (9 * 4 + 13 * 4))),
     ]
 
 
@@ -123,11 +140,16 @@ class SceneWriter:
         return self._addr is not None
 
     # ------------------------------------------------------------------
-    def write(self, vertices, indices, camera, lights=None):
+    def write(self, vertices, indices, camera, lights=None, albedos=None,
+              settings=None):
         """vertices: (n,3) float32 world space; indices: (m,) uint32;
         camera: dict with origin/right/up/forward (each (3,) float) and
-        tan_half_fov_y float; lights: optional (L,8) float32 array with
-        [px,py,pz,intensity,cr,cg,cb,pad] per light. Returns True if published."""
+        tan_half_fov_y float;
+        lights: optional (L,16) float32 typed-light rows
+        (px,py,pz,type,dx,dy,dz,intensity,cr,cg,cb,size_x,size_y,ax,ay,az);
+        albedos: optional (n,3) float32 linear RGB per vertex;
+        settings: optional dict {flags:int, exposure:float, history:float}.
+        Returns True if published."""
         if self._addr is None:
             return False
         try:
@@ -140,13 +162,30 @@ class SceneWriter:
             lbuf = b""
             lbytes = 0
             if lights is not None and lights.size:
-                lcount = int(lights.shape[0])
-                lbuf = np.ascontiguousarray(lights, dtype=np.float32).ravel().tobytes()
+                lrows = np.ascontiguousarray(lights, dtype=np.float32).reshape(-1, LIGHT_FLOATS)
+                lcount = int(lrows.shape[0])
+                lbuf = lrows.ravel().tobytes()
                 lbytes = len(lbuf)
+
+            abuf = b""
+            abytes = 0
+            if albedos is not None and albedos.size:
+                arows = np.ascontiguousarray(albedos, dtype=np.float32).reshape(-1, 3)
+                if int(arows.shape[0]) == vcount:
+                    abuf = arows.ravel().tobytes()
+                    abytes = len(abuf)
+
+            sflags = FLAG_TAA
+            sexposure = 1.0
+            shistory = 20.0
+            if settings:
+                sflags = int(settings.get("flags", sflags))
+                sexposure = float(settings.get("exposure", sexposure))
+                shistory = float(settings.get("history", shistory))
 
             vbytes = vcount * 3 * 4
             ibytes = icount * 4
-            if vbytes + ibytes + lbytes > self._max_bytes:
+            if vbytes + ibytes + lbytes + abytes > self._max_bytes:
                 return False
 
             hdr = _SceneHeader.from_buffer_copy(ctypes.string_at(self._addr, HEADER_SIZE))
@@ -155,7 +194,7 @@ class SceneWriter:
             hdr.ready = 0
             ctypes.memmove(self._addr, ctypes.byref(hdr), HEADER_SIZE)
 
-            # Copy vertices, indices, then lights into the view.
+            # Copy vertices, indices, lights, albedos into the view.
             vbuf = np.ascontiguousarray(vertices, dtype=np.float32).ravel().tobytes()
             ibuf = np.ascontiguousarray(indices, dtype=np.uint32).ravel().tobytes()
             cam_key = (
@@ -165,23 +204,30 @@ class SceneWriter:
                 tuple(float(x) for x in camera["forward"]),
                 float(camera["tan_half_fov_y"]),
             )
-            sig = (vbuf, ibuf, lbuf, cam_key)
+            sig = (vbuf, ibuf, lbuf, abuf, cam_key,
+                   sflags, sexposure, shistory)
             if sig == self._last_sig:
                 return True
             self._last_sig = sig
 
             vdst = self._addr + HEADER_SIZE
             idst = self._addr + HEADER_SIZE + vbytes
-            ldst = self._addr + HEADER_SIZE + vbytes + ibytes
+            ldst = idst + ibytes
+            adst = ldst + lbytes
             ctypes.memmove(vdst, vbuf, vbytes)
             ctypes.memmove(idst, ibuf, ibytes)
             if lbytes:
                 ctypes.memmove(ldst, lbuf, lbytes)
+            if abytes:
+                ctypes.memmove(adst, abuf, abytes)
 
             # Fill header + camera, bump epoch LAST, clear writing.
             hdr.vertex_count = ctypes.c_uint32(vcount)
             hdr.index_count = ctypes.c_uint32(icount)
             hdr.light_count = ctypes.c_uint32(lcount)
+            hdr.flags = ctypes.c_uint32(sflags)
+            hdr.exposure = ctypes.c_float(sexposure)
+            hdr.taa_history = ctypes.c_float(shistory)
             for i in range(3):
                 hdr.cam_origin[i] = camera["origin"][i]
                 hdr.cam_right[i] = camera["right"][i]

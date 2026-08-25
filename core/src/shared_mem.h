@@ -21,19 +21,22 @@
 // core should ray-trace: world-space triangle soup + camera basis. The core
 // polls it; the addon (Python) writes it. Header (256 bytes) at offset 0:
 //   u32 magic        = 0x32525353 ('RRS3')
-//   u32 version      = 1
+//   u32 version      = 2
 //   u32 epoch        (incremented LAST by the writer on each update)
 //   u32 ready        (1 = valid)
 //   u32 writing      (1 while the writer is mid-update)
 //   u32 vertex_count (xyz triples)
 //   u32 index_count  (uint32 indices)
-//   u32 light_count  (point lights, 8 floats each)
+//   u32 light_count  (typed lights, 16 floats each - see Light)
+//   u32 flags        (bit0 = TAA enabled)
+//   float exposure, taa_history
 //   float cam_origin[3], cam_right[3], cam_up[3], cam_forward[3]
 //   float cam_tan_half_fov_y
 //   (padded to 256)
 //   offset 256: vertices  (vertex_count * 3 * float32, world space)
 //   then      : indices   (index_count * uint32)
-//   then      : lights    (light_count * 8 * float32: px,py,pz,intensity,cr,cg,cb,pad)
+//   then      : lights    (light_count * 16 * float32 - see Light layout)
+//   then      : albedos   (vertex_count * 3 * float32, linear RGB per vertex)
 
 #pragma once
 
@@ -50,14 +53,20 @@ namespace rstr2 {
 // Scene bridge types
 // ----------------------------------------------------------------------
 static constexpr uint32_t kSceneMagic = 0x32525353u;
-static constexpr uint32_t kSceneVersion = 1;
+static constexpr uint32_t kSceneVersion = 2;
 static constexpr size_t kSceneHeaderSize = 256;
 static constexpr size_t kMaxSceneBytes = 64 * 1024 * 1024; // 64 MB safety cap
+
+static constexpr uint32_t kSceneFlagTaa = 1u << 0;
 
 struct SceneData {
     std::vector<float> vertices;       // xyz, world space
     std::vector<uint32_t> indices;     // uint32 triangle indices
-    std::vector<PointLight> lights;    // point-light pool (RTXDI)
+    std::vector<Light> lights;         // typed-light pool (RTXDI)
+    std::vector<float> albedos;        // rgb triples per vertex (may be empty)
+    uint32_t flags = kSceneFlagTaa;
+    float exposure = 1.0f;
+    float taa_history = 20.0f;
     float cam_origin[3] = {0, 0, 0};
     float cam_right[3] = {1, 0, 0};
     float cam_up[3] = {0, 1, 0};
@@ -75,12 +84,15 @@ struct SceneHeader {
     uint32_t vertex_count;
     uint32_t index_count;
     uint32_t light_count;
+    uint32_t flags;
+    float exposure;
+    float taa_history;
     float cam_origin[3];
     float cam_right[3];
     float cam_up[3];
     float cam_forward[3];
     float cam_tan_half_fov_y;
-    uint8_t reserved[kSceneHeaderSize - (8 * 4 + 13 * 4)];
+    uint8_t reserved[kSceneHeaderSize - (9 * 4 + 13 * 4)];
 };
 #pragma pack(pop)
 

@@ -11,10 +11,11 @@
 bl_info = {
     "name": "Rstr2",
     "author": "you",
-    "version": (0, 3, 0),
+    "version": (0, 4, 0),
     "blender": (4, 0, 0),
     "location": "Render Properties > Render Engine > Rstr2",
-    "description": "Custom RT renderer (Phase 3: DXR scene sync from Blender)",
+    "description": "Custom RT renderer (OptiX + ReSTIR DI: typed lights, "
+                   "per-material albedo, TAA)",
     "category": "Render",
 }
 
@@ -60,12 +61,16 @@ def _resize_nearest(arr, width, height):
 
 
 def _extract_scene(depsgraph):
-    """Build (vertices, indices, camera) for the native core.
+    """Build (vertices, indices, camera, lights, albedos) for the native core.
 
     vertices : (n, 3) float32, world-space triangle-soup vertices
     indices  : (m,) uint32, 3 per triangle, indexing into `vertices`
     camera   : dict with origin/right/up/forward (each length-3) and
                tan_half_fov_y (float)
+    lights   : (L, 16) float32 typed-light rows
+               [px,py,pz,type,dx,dy,dz,intensity,cr,cg,cb,sx,sy,ax,ay,az]
+               types: 0 point, 1 sun, 2 spot, 3 area
+    albedos  : (n, 3) float32 linear RGB per vertex (from material base color)
 
     Returns None when the scene has no mesh geometry (so the core keeps its
     last/ default scene instead of failing on an empty update).
@@ -105,6 +110,7 @@ def _extract_scene(depsgraph):
     # --- World-space triangle soup from all MESH objects -----------------
     vert_chunks = []
     idx_chunks = []
+    alb_chunks = []
     offset = 0
     for obj in depsgraph.objects:
         if obj.type != "MESH":
@@ -124,11 +130,19 @@ def _extract_scene(depsgraph):
         vert_chunks.append(world)
 
         loops = mesh.loops
+        materials = list(getattr(mesh, "materials", None) or [])
         li = []
+        la = []
         for tri in mesh.loop_triangles:
+            rgb = (0.8, 0.8, 0.82)
+            mi = int(tri.material_index)
+            if 0 <= mi < len(materials):
+                rgb = _material_rgb(materials[mi])
+            la.extend([rgb[0], rgb[1], rgb[2]] * 3)
             for lp in tri.loops:
                 li.append(offset + int(loops[lp].vertex_index))
         idx_chunks.append(np.asarray(li, dtype=np.uint32))
+        alb_chunks.append(np.asarray(la, dtype=np.float32).reshape(-1, 3))
         offset += n
 
     if not vert_chunks:
@@ -136,8 +150,10 @@ def _extract_scene(depsgraph):
 
     vertices = np.concatenate(vert_chunks, axis=0)
     indices = np.concatenate(idx_chunks, axis=0) if idx_chunks else np.empty((0,), dtype=np.uint32)
+    albedos = (np.concatenate(alb_chunks, axis=0)
+               if alb_chunks else np.empty((0, 3), dtype=np.float32))
 
-    # --- Point lights (world space) --------------------------------------
+    # --- Typed lights (point / sun / spot / area), world space ------------
     light_rows = []
     for obj in depsgraph.objects:
         if obj.type != "LIGHT":
@@ -148,12 +164,83 @@ def _extract_scene(depsgraph):
         energy = float(getattr(ld, "energy", 10.0))
         col = ld.color
         cr, cg, cb = float(col[0]), float(col[1]), float(col[2])
-        intensity = energy * 0.1  # scale Blender energy into our radiance range
-        light_rows.append([pos[0], pos[1], pos[2], intensity, cr, cg, cb, 0.0])
-    lights = (np.array(light_rows, dtype=np.float32).reshape(-1, 8)
-              if light_rows else np.empty((0, 8), dtype=np.float32))
+        # Emission direction = local -Z of the light object (Blender convention).
+        fwd = (-float(mw[0][2]), -float(mw[1][2]), -float(mw[2][2]))
+        flen = math.sqrt(fwd[0] ** 2 + fwd[1] ** 2 + fwd[2] ** 2)
+        if flen > 1e-9:
+            fwd = (fwd[0] / flen, fwd[1] / flen, fwd[2] / flen)
+        else:
+            fwd = (0.0, -1.0, 0.0)
+        ltype = getattr(ld, "type", "POINT")
 
-    return vertices, indices, cam, lights
+        if ltype == "SUN":
+            intensity = energy * 3.0  # sun strength ~ irradiance; brighten a touch
+            row = [pos[0], pos[1], pos[2], 1.0,
+                   fwd[0], fwd[1], fwd[2], intensity,
+                   cr, cg, cb, 0.0, 0.0,
+                   0.0, 0.0, 0.0]
+        elif ltype == "SPOT":
+            spot_size = float(getattr(ld, "spot_size", 0.8))
+            blend = float(getattr(ld, "spot_blend", 0.15))
+            cos_outer = math.cos(spot_size * 0.5)
+            cos_inner = math.cos(spot_size * 0.5 * max(1.0 - blend, 0.001))
+            intensity = energy * 0.1
+            row = [pos[0], pos[1], pos[2], 2.0,
+                   fwd[0], fwd[1], fwd[2], intensity,
+                   cr, cg, cb, cos_outer, cos_inner,
+                   0.0, 0.0, 0.0]
+        elif ltype == "AREA":
+            size_x = float(getattr(ld, "size", 1.0))
+            shape = getattr(ld, "shape", "SQUARE")
+            size_y = float(getattr(ld, "size_y", size_x)) if shape == "RECTANGLE" else size_x
+            ref = (0.0, 1.0, 0.0) if abs(fwd[1]) < 0.9 else (1.0, 0.0, 0.0)
+            ax = (ref[1] * fwd[2] - ref[2] * fwd[1],
+                  ref[2] * fwd[0] - ref[0] * fwd[2],
+                  ref[0] * fwd[1] - ref[1] * fwd[0])
+            alen = math.sqrt(ax[0] ** 2 + ax[1] ** 2 + ax[2] ** 2)
+            if alen > 1e-9:
+                ax = (ax[0] / alen, ax[1] / alen, ax[2] / alen)
+            else:
+                ax = (1.0, 0.0, 0.0)
+            intensity = energy * 0.1
+            row = [pos[0], pos[1], pos[2], 3.0,
+                   fwd[0], fwd[1], fwd[2], intensity,
+                   cr, cg, cb, size_x, size_y,
+                   ax[0], ax[1], ax[2]]
+        else:  # POINT (default)
+            intensity = energy * 0.1  # scale Blender energy into our radiance range
+            row = [pos[0], pos[1], pos[2], 0.0,
+                   0.0, 0.0, 0.0, intensity,
+                   cr, cg, cb, 0.0, 0.0,
+                   0.0, 0.0, 0.0]
+        light_rows.append(row)
+
+    lights = (np.array(light_rows, dtype=np.float32).reshape(-1, 16)
+              if light_rows else np.empty((0, 16), dtype=np.float32))
+
+    return vertices, indices, cam, lights, albedos
+
+
+def _material_rgb(mat):
+    """Linear base-color RGB for a material (Principled Base Color preferred).
+
+    Note: Blender colors are sRGB-encoded; converting exactly would need the
+    scene view transform. We approximate with the common gamma-2.0 shortcut,
+    which lands close enough for preview rendering."""
+    try:
+        if mat is not None and getattr(mat, "use_nodes", False) and mat.node_tree:
+            for node in mat.node_tree.nodes:
+                if node.type == "BSDF_PRINCIPLED":
+                    inp = node.inputs.get("Base Color")
+                    if inp is not None and not inp.is_linked:
+                        c = inp.default_value
+                        return (float(c[0]) ** 2.0, float(c[1]) ** 2.0,
+                                float(c[2]) ** 2.0)
+                    break
+        c = mat.diffuse_color
+        return (float(c[0]) ** 2.0, float(c[1]) ** 2.0, float(c[2]) ** 2.0)
+    except Exception:
+        return (0.8, 0.8, 0.82)
 
 
 class Rstr2Engine(RenderEngine):
@@ -356,9 +443,22 @@ class Rstr2Engine(RenderEngine):
             self._dbg = "scene map n/a"
             return
         try:
-            vertices, indices, camera, lights = scene
-            ok = self._scene_writer.write(vertices, indices, camera, lights)
-            self._dbg = ("scene %d v / %d i / %d L" % (vertices.shape[0], indices.shape[0], lights.shape[0])) if ok else "scene write fail"
+            vertices, indices, camera, lights, albedos = scene
+
+            # Scene-level render settings (blRstr-parity panel).
+            sflags = 1 if getattr(depsgraph.scene.rstr2, "use_taa", True) else 0
+            settings = {
+                "flags": sflags,
+                "exposure": float(getattr(depsgraph.scene.rstr2, "exposure", 1.0)),
+                "history": float(getattr(depsgraph.scene.rstr2, "taa_history", 20)),
+            }
+
+            ok = self._scene_writer.write(vertices, indices, camera, lights,
+                                          albedos, settings)
+            self._dbg = ("scene %d v / %d i / %d L%s"
+                         % (vertices.shape[0], indices.shape[0],
+                            lights.shape[0],
+                            "" if albedos.size else " no-alb")) if ok else "scene write fail"
         except Exception as e:
             self._dbg = "scene err: %s" % str(e)[:60]
 
@@ -455,11 +555,62 @@ class Rstr2Engine(RenderEngine):
             pass
 
 
+# ----------------------------------------------------------------------
+# Scene-level render settings (blRstr-parity) + Render-properties panel
+# ----------------------------------------------------------------------
+class Rstr2SceneSettings(bpy.types.PropertyGroup):
+    use_taa: bpy.props.BoolProperty(
+        name="Use TAA",
+        description="Temporal anti-aliasing + accumulation "
+                    "(jittered rays + exponential history)",
+        default=True,
+    )
+    exposure: bpy.props.FloatProperty(
+        name="Exposure",
+        description="Pre-tonemap exposure multiplier",
+        min=0.05, max=10.0, default=1.0,
+    )
+    taa_history: bpy.props.IntProperty(
+        name="TAA History Length",
+        description="Frames of temporal history. Higher = smoother, "
+                    "slower to react",
+        min=1, max=128, default=20,
+    )
+
+
+class RSTR2_PT_settings(bpy.types.Panel):
+    bl_label = "Rstr2"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "render"
+
+    def draw(self, context):
+        layout = self.layout
+        if context.scene.render.engine != "RSTR2":
+            layout.label(text="Select the Rstr2 render engine", icon="INFO")
+            return
+        props = getattr(context.scene, "rstr2", None)
+        if props is None:
+            return
+        col = layout.column(align=True)
+        col.prop(props, "use_taa")
+        if props.use_taa:
+            col.prop(props, "taa_history")
+        col = layout.column()
+        col.prop(props, "exposure")
+
+
 def register():
     bpy.utils.register_class(Rstr2Engine)
+    bpy.utils.register_class(Rstr2SceneSettings)
+    bpy.utils.register_class(RSTR2_PT_settings)
+    bpy.types.Scene.rstr2 = bpy.props.PointerProperty(type=Rstr2SceneSettings)
 
 
 def unregister():
+    del bpy.types.Scene.rstr2
+    bpy.utils.unregister_class(RSTR2_PT_settings)
+    bpy.utils.unregister_class(Rstr2SceneSettings)
     bpy.utils.unregister_class(Rstr2Engine)
 
 
