@@ -350,7 +350,9 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
         error = "Rstr2: scene has no triangles.";
         return false;
     }
-    rlogf("Rstr2Core: set_scene v=%zu i=%zu\n", vcount, icount);
+    rlogf("Rstr2Core: set_scene v=%zu i=%zu l=%zu alb=%zu flg=%u exp=%.2f hist=%.1f",
+          vcount, icount, scene_.lights.size(), scene_.albedos.size() / 3u,
+          scene_.flags, scene_.exposure, scene_.taa_history);
 
     // Free previous buffers.
     if (im->d_vertices) { cuMemFree(im->d_vertices); im->d_vertices = 0; }
@@ -502,6 +504,23 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
 
     const size_t out_bytes = static_cast<size_t>(width_) * height_ * 16u;
     CU_CHECK(cuMemcpyDtoH(out_pixels, im->d_output, out_bytes));
+
+    // Temporary diagnostics: dump launch state + a probed pixel for the
+    // first few frames after each scene change.
+    if (im->frame_index < 3u || im->scene_dirty) {
+        const size_t probe_idx =
+            (static_cast<size_t>(height_ / 2) * width_ + width_ / 2) * 4u;
+        float probe[4] = { -1, -1, -1, -1 };
+        float acc_probe[4] = { -1, -1, -1, -1 };
+        cuMemcpyDtoH(probe, im->d_output + probe_idx * sizeof(float), sizeof(probe));
+        cuMemcpyDtoH(acc_probe, im->d_accum + probe_idx * sizeof(float), sizeof(acc_probe));
+        rlogf("Rstr2Core: f=%u cnt=%u alb=%d jit=%.3f,%.3f a=%.3f exp=%.2f "
+              "flg=%u hist=%.1f px=%.3f,%.3f,%.3f acc=%.3f,%.3f,%.3f",
+              im->frame_index, p.light_count, im->albedo_bytes > 0 ? 1 : 0,
+              p.jitter_x, p.jitter_y, p.accum_alpha, p.exposure,
+              scene_.flags, scene_.taa_history,
+              probe[0], probe[1], probe[2], acc_probe[0], acc_probe[1], acc_probe[2]);
+    }
 
     im->frame_index++;
     return true;
