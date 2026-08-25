@@ -324,20 +324,38 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
     CU_CHECK(cuMemcpyHtoD(im->d_vertices, scene_.vertices.data(), im->vert_bytes));
     CU_CHECK(cuMemcpyHtoD(im->d_indices, scene_.indices.data(), im->idx_bytes));
 
+    // Expand the indexed mesh into a non-indexed vertex soup for the GAS.
+    // (Matches the canonical OptiX triangle example; isolates indexed-GAS as a
+    // potential failure. The original indexed buffers are still uploaded and
+    // used by the closest-hit shader for shading.)
+    std::vector<float> soup;
+    soup.reserve(icount * 3);
+    for (size_t t = 0; t < icount / 3; ++t) {
+        for (int k = 0; k < 3; ++k) {
+            unsigned int idx = scene_.indices[t * 3 + k];
+            soup.push_back(scene_.vertices[idx * 3 + 0]);
+            soup.push_back(scene_.vertices[idx * 3 + 1]);
+            soup.push_back(scene_.vertices[idx * 3 + 2]);
+        }
+    }
+    const size_t soup_verts = soup.size() / 3;
+    CUdeviceptr d_soup = 0;
+    CU_CHECK(cuMemAlloc(&d_soup, soup.size() * sizeof(float)));
+    CU_CHECK(cuMemcpyHtoD(d_soup, soup.data(), soup.size() * sizeof(float)));
+
     // Build a single triangle-array GAS. Disable face culling so geometry is
     // visible regardless of index winding (OptiX back-face-culls by default,
     // which made every ray miss when the camera saw the "back" side).
     unsigned int tri_flags = OPTIX_GEOMETRY_FLAG_DISABLE_TRIANGLE_FACE_CULLING;
     OptixBuildInput build_input = {};
     build_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
-    build_input.triangleArray.vertexBuffers = &im->d_vertices;
-    build_input.triangleArray.numVertices = (unsigned int)vcount;
+    build_input.triangleArray.vertexBuffers = &d_soup;
+    build_input.triangleArray.numVertices = (unsigned int)soup_verts;
     build_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
     build_input.triangleArray.vertexStrideInBytes = sizeof(Vec3F);
-    build_input.triangleArray.indexBuffer = im->d_indices;
-    build_input.triangleArray.numIndexTriplets = (unsigned int)(icount / 3);
-    build_input.triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
-    build_input.triangleArray.indexStrideInBytes = 0;
+    build_input.triangleArray.indexBuffer = 0;
+    build_input.triangleArray.numIndexTriplets = 0;
+    build_input.triangleArray.indexFormat = OPTIX_INDICES_FORMAT_NONE;
     build_input.triangleArray.numSbtRecords = 1;
     build_input.triangleArray.sbtIndexOffsetBuffer = 0;
     build_input.triangleArray.flags = &tri_flags;
@@ -363,6 +381,7 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
                                 &handle, nullptr, 0));
     im->traversable = handle;
     CU_CHECK(cuStreamSynchronize(im->stream));
+    CU_CHECK(cuMemFree(d_soup));
 
     rlogf("Rstr2Core: GAS built (handle=%llu bytes=%zu scratch=%zu)\n",
           (unsigned long long)handle, im->gas_bytes, im->gas_scratch_bytes);
