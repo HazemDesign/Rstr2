@@ -73,12 +73,10 @@ static void optix_log_cb(unsigned int level, const char* tag,
 // the addon scene bridge.
 SceneData make_default_scene() {
     SceneData s;
-    // Huge triangle (test geometry): spans the whole view so a working GAS
-    // must produce a fully-lit frame.
     s.vertices = {
-        -10.0f, -10.0f, 0.0f,
-         10.0f, -10.0f, 0.0f,
-          0.0f,  10.0f, 0.0f,
+        -0.7f, -0.5f, 0.0f,
+         0.7f, -0.5f, 0.0f,
+         0.0f,  0.7f, 0.0f,
     };
     s.indices = {0, 1, 2};
     s.cam_origin[0] = 0.0f; s.cam_origin[1] = 0.6f; s.cam_origin[2] = -2.2f;
@@ -326,8 +324,10 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
     CU_CHECK(cuMemcpyHtoD(im->d_vertices, scene_.vertices.data(), im->vert_bytes));
     CU_CHECK(cuMemcpyHtoD(im->d_indices, scene_.indices.data(), im->idx_bytes));
 
-    // Build a single triangle-array GAS.
-    unsigned int tri_flags = OPTIX_GEOMETRY_FLAG_NONE;
+    // Build a single triangle-array GAS. Disable face culling so geometry is
+    // visible regardless of index winding (OptiX back-face-culls by default,
+    // which made every ray miss when the camera saw the "back" side).
+    unsigned int tri_flags = OPTIX_GEOMETRY_FLAG_DISABLE_TRIANGLE_FACE_CULLING;
     OptixBuildInput build_input = {};
     build_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
     build_input.triangleArray.vertexBuffers = &im->d_vertices;
@@ -387,20 +387,6 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     p.handle = im->traversable;
 
     CU_CHECK(cuMemcpyHtoD(im->d_params, &p, sizeof(Params)));
-
-    static bool s_first = true;
-    if (s_first) {
-        s_first = false;
-        rlogf("Rstr2Core: launch handle=%llu w=%u h=%u origin=(%.2f,%.2f,%.2f) "
-              "fwd=(%.2f,%.2f,%.2f) right=(%.2f,%.2f,%.2f) up=(%.2f,%.2f,%.2f) "
-              "tan=%.3f verts=%p idx=%p\n",
-              (unsigned long long)p.handle, p.width, p.height,
-              p.cam_origin.x, p.cam_origin.y, p.cam_origin.z,
-              p.cam_forward.x, p.cam_forward.y, p.cam_forward.z,
-              p.cam_right.x, p.cam_right.y, p.cam_right.z,
-              p.cam_up.x, p.cam_up.y, p.cam_up.z,
-              p.cam_tan_half_fov_y, (void*)p.vertices, (void*)p.indices);
-    }
 
     OPTIX_CHECK(optixLaunch(im->pipeline, im->stream, im->d_params,
                             sizeof(Params), &im->sbt,
