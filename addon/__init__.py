@@ -108,6 +108,9 @@ def _extract_scene(depsgraph):
         }
 
     # --- World-space triangle soup from all MESH objects -----------------
+    # Non-indexed soup: one vertex per triangle corner, so each triangle owns
+    # its three verts exclusively. This lets albedo be exact per triangle even
+    # when meshes share vertices across different materials.
     vert_chunks = []
     idx_chunks = []
     alb_chunks = []
@@ -116,34 +119,42 @@ def _extract_scene(depsgraph):
         if obj.type != "MESH":
             continue
         mesh = obj.evaluated_get(depsgraph).data
-        n = len(mesh.vertices)
-        if n == 0:
+        nt = len(mesh.loop_triangles)
+        if nt == 0:
             continue
 
+        n = len(mesh.vertices)
         local = np.empty((n, 3), dtype=np.float32)
         mesh.vertices.foreach_get("co", local.ravel())
 
-        m = np.array(obj.matrix_world, dtype=np.float32)
-        ones = np.ones((n, 1), dtype=np.float32)
-        vh = np.concatenate([local, ones], axis=1)  # (n, 4)
-        world = (m @ vh.T).T[:, :3].astype(np.float32)
-        vert_chunks.append(world)
-
-        loops = mesh.loops
-        materials = list(getattr(mesh, "materials", None) or [])
-        li = []
-        la = []
+        # Corner -> source-vertex map for every loop_triangle.
+        nt_loops = len(mesh.loops)
+        loops_vertex = np.empty(nt_loops, dtype=np.int64)
+        mesh.loops.foreach_get("vertex_index", loops_vertex)
+        corner_l = np.empty(nt * 3, dtype=np.int64)
+        w = 0
         for tri in mesh.loop_triangles:
+            for lp in tri.loops:
+                corner_l[w] = lp
+                w += 1
+        corner_v = loops_vertex[corner_l]
+        m = np.array(obj.matrix_world, dtype=np.float32)
+        vh = np.concatenate([local[corner_v], np.ones((nt * 3, 1), dtype=np.float32)], axis=1)
+        world = (m @ vh.T).T[:, :3].astype(np.float32)
+
+        materials = list(getattr(mesh, "materials", None) or [])
+        mat_rgb = np.empty((nt, 3), dtype=np.float32)
+        for t, tri in enumerate(mesh.loop_triangles):
             rgb = (0.8, 0.8, 0.82)
             mi = int(tri.material_index)
             if 0 <= mi < len(materials):
                 rgb = _material_rgb(materials[mi])
-            la.extend([rgb[0], rgb[1], rgb[2]] * 3)
-            for lp in tri.loops:
-                li.append(offset + int(loops[lp].vertex_index))
-        idx_chunks.append(np.asarray(li, dtype=np.uint32))
-        alb_chunks.append(np.asarray(la, dtype=np.float32).reshape(-1, 3))
-        offset += n
+            mat_rgb[t] = rgb
+
+        vert_chunks.append(world)
+        idx_chunks.append(np.arange(nt * 3, dtype=np.uint32) + offset)
+        alb_chunks.append(np.repeat(mat_rgb, 3, axis=0).astype(np.float32))
+        offset += nt * 3
 
     if not vert_chunks:
         return None

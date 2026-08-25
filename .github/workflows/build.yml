@@ -2,7 +2,7 @@ name: build-core-optix
 
 on:
   push:
-    paths: ["core/**", ".github/workflows/build.yml"]
+    paths: ["core/**", "addon/**", ".github/workflows/build.yml"]
   workflow_dispatch:
 
 jobs:
