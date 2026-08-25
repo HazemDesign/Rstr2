@@ -86,6 +86,11 @@ struct Params {
     float         accum_alpha;      // EMA blend for the new sample (1 = reset)
     float         exposure;         // pre-tonemap multiplier
     float         taa_clamp;        // firefly clamp before EMA (0 = off)
+
+    // --- World / film ---------------------------------------------------
+    float         world_r, world_g, world_b;  // uniform env radiance
+    float         world_strength;             // 0 disables world light
+    unsigned int  film_transparent;           // alpha=0 for background pixels
 };
 
 } // namespace rstr2

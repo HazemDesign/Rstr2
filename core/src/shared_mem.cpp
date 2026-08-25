@@ -158,6 +158,16 @@ bool SceneMem::consistent_copy(SceneData& out) {
     out.exposure = hdr->exposure;
     out.taa_history = hdr->taa_history;
 
+    // Reserved-area addendum (v2): float world_color[3] + world_strength.
+    {
+        float world[4];
+        memcpy(world, hdr->reserved, sizeof(world));
+        out.world_color[0] = world[0];
+        out.world_color[1] = world[1];
+        out.world_color[2] = world[2];
+        out.world_strength = world[3];
+    }
+
     for (int i = 0; i < 3; ++i) {
         out.cam_origin[i] = hdr->cam_origin[i];
         out.cam_right[i] = hdr->cam_right[i];

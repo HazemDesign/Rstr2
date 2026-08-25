@@ -58,6 +58,7 @@ static constexpr size_t kSceneHeaderSize = 256;
 static constexpr size_t kMaxSceneBytes = 64 * 1024 * 1024; // 64 MB safety cap
 
 static constexpr uint32_t kSceneFlagTaa = 1u << 0;
+static constexpr uint32_t kSceneFlagFilmTransparent = 1u << 1;
 
 struct SceneData {
     std::vector<float> vertices;       // xyz, world space
@@ -67,6 +68,10 @@ struct SceneData {
     uint32_t flags = kSceneFlagTaa;
     float exposure = 1.0f;
     float taa_history = 20.0f;
+    // World/environment light (uniform-color approximation), packed into the
+    // header's reserved area by v2 writers. strength == 0 => no world light.
+    float world_color[3] = {0.05f, 0.05f, 0.05f};
+    float world_strength = 0.0f;
     float cam_origin[3] = {0, 0, 0};
     float cam_right[3] = {1, 0, 0};
     float cam_up[3] = {0, 1, 0};

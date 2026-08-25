@@ -482,6 +482,14 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     p.exposure = (scene_.exposure > 0.0f) ? scene_.exposure : 1.0f;
     p.taa_clamp = 10.0f;   // blRstr-parity default firefly clamp
     p.accum = reinterpret_cast<Vec4F*>(im->d_accum);
+
+    // World / film state.
+    p.world_r = scene_.world_color[0];
+    p.world_g = scene_.world_color[1];
+    p.world_b = scene_.world_color[2];
+    p.world_strength = scene_.world_strength;
+    p.film_transparent =
+        (scene_.flags & kSceneFlagFilmTransparent) ? 1u : 0u;
     im->scene_dirty = false;
 
     CU_CHECK(cuMemcpyHtoD(im->d_params, &p, sizeof(Params)));

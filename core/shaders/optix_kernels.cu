@@ -218,9 +218,19 @@ extern "C" __global__ void __closesthit__ch() {
     g[3u * pidx + 2u] = make_float4(alb.x, alb.y, alb.z, 0.0f);
 }
 
+// ---- world / environment ----------------------------------------------------
+static __device__ __forceinline__ float3 world_radiance() {
+    if (params.world_strength > 0.0f) {
+        return make_float3(params.world_r * params.world_strength,
+                           params.world_g * params.world_strength,
+                           params.world_b * params.world_strength);
+    }
+    return make_f3(0.03f, 0.04f, 0.06f);   // legacy default backdrop
+}
+
 // ---- temporal display accumulation (TAA) ------------------------------------
 static __device__ __forceinline__ void accumulate_and_present(
-    unsigned int pidx, const float3& hdr) {
+    unsigned int pidx, const float3& hdr, float out_alpha) {
     // Firefly clamp before blending (blRstr-style "TAA clamping").
     float3 c = hdr;
     if (params.taa_clamp > 0.0f) {
@@ -235,11 +245,11 @@ static __device__ __forceinline__ void accumulate_and_present(
     float3 acc = make_float3(prev.x + (c.x - prev.x) * a,
                              prev.y + (c.y - prev.y) * a,
                              prev.z + (c.z - prev.z) * a);
-    accBuf[pidx] = make_float4(acc.x, acc.y, acc.z, 1.0f);
+    accBuf[pidx] = make_float4(acc.x, acc.y, acc.z, out_alpha);
 
     float3 disp = tonemap(acc * params.exposure);
     float4* img = (float4*)params.image;
-    img[pidx] = make_float4(disp.x, disp.y, disp.z, 1.0f);
+    img[pidx] = make_float4(disp.x, disp.y, disp.z, out_alpha);
 }
 
 // ====================== RAYGEN: primary + reservoir ========================
@@ -320,8 +330,9 @@ extern "C" __global__ void __raygen__rg_shade() {
     float4 ph = g[3u * pidx];
 
     if (ph.w < 0.5f) {
-        // Background (also accumulated so silhouettes converge smoothly).
-        accumulate_and_present(pidx, make_f3(0.03f, 0.04f, 0.06f));
+        // Background / environment (accumulated so silhouettes converge).
+        float alpha = params.film_transparent ? 0.0f : 1.0f;
+        accumulate_and_present(pidx, world_radiance(), alpha);
         return;
     }
 
@@ -329,22 +340,28 @@ extern "C" __global__ void __raygen__rg_shade() {
     float3 N = make_f3(g[3u * pidx + 1u].x, g[3u * pidx + 1u].y, g[3u * pidx + 1u].z);
     float3 albedo = make_f3(g[3u * pidx + 2u].x, g[3u * pidx + 2u].y, g[3u * pidx + 2u].z);
 
+    // Uniform world/environment ambient on surfaces (approximation).
+    float3 ambient = make_f3(0.0f, 0.0f, 0.0f);
+    if (params.world_strength > 0.0f) {
+        ambient = albedo * params.world_strength *
+                  make_float3(params.world_r, params.world_g, params.world_b);
+    }
+
     uint32_t NL = params.light_count;
 
     // Fallback shading when no lights are provided (default scene).
     if (NL == 0u) {
-        float3 base = albedo;
         float3 key = normalize3(make_f3(0.3f, 0.7f, -0.6f));
         float ndl = max(dot3(N, key), 0.0f);
-        float3 col = base * (0.25f + 0.75f * ndl);
-        accumulate_and_present(pidx, col);
+        float3 col = albedo * (0.25f + 0.75f * ndl) + ambient;
+        accumulate_and_present(pidx, col, 1.0f);
         return;
     }
 
     rstr2::Reservoir r = params.reservoirs[pidx];
     if (r.M == 0u || r.lightIdx >= NL || r.wsum <= 0.0f) {
-        // No usable light sample this frame.
-        accumulate_and_present(pidx, make_f3(0.0f, 0.0f, 0.0f));
+        // No usable light sample this frame - world ambient only.
+        accumulate_and_present(pidx, ambient, 1.0f);
         return;
     }
     float W = r.wsum / max((float)r.M, 1.0f);
@@ -376,7 +393,7 @@ extern "C" __global__ void __raygen__rg_shade() {
     float3 f_r = albedo * (1.0f / 3.14159265f);
     float3 color = make_float3(W * f_r.x * Le.x * vis,
                                W * f_r.y * Le.y * vis,
-                               W * f_r.z * Le.z * vis);
+                               W * f_r.z * Le.z * vis) + ambient;
 
-    accumulate_and_present(pidx, color);
+    accumulate_and_present(pidx, color, 1.0f);
 }

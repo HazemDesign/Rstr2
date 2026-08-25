@@ -232,6 +232,37 @@ def _extract_scene(depsgraph):
     return vertices, indices, cam, lights, albedos
 
 
+def _world_light(scene):
+    """Uniform world/environment radiance (r, g, b, strength) or None.
+
+    Reads the World's Background node (the common case). Color is converted
+    from sRGB with the same gamma-2.0 approximation used for materials."""
+    try:
+        world = scene.world
+        if world is None:
+            return None
+        strength = 1.0
+        color = (1.0, 1.0, 1.0)
+        if getattr(world, "use_nodes", False) and world.node_tree:
+            for node in world.node_tree.nodes:
+                if node.type == "BACKGROUND":
+                    inp_c = node.inputs.get("Color")
+                    inp_s = node.inputs.get("Strength")
+                    if inp_c is not None and not inp_c.is_linked:
+                        c = inp_c.default_value
+                        color = (float(c[0]), float(c[1]), float(c[2]))
+                    if inp_s is not None and not inp_s.is_linked:
+                        strength = float(inp_s.default_value)
+                    break
+        else:
+            c = world.color
+            color = (float(c[0]), float(c[1]), float(c[2]))
+        lin = tuple(x * x for x in color)
+        return (lin[0], lin[1], lin[2], strength)
+    except Exception:
+        return None
+
+
 def _material_rgb(mat):
     """Linear base-color RGB for a material (Principled Base Color preferred).
 
@@ -456,13 +487,19 @@ class Rstr2Engine(RenderEngine):
         try:
             vertices, indices, camera, lights, albedos = scene
 
-            # Scene-level render settings (blRstr-parity panel).
-            sflags = 1 if getattr(depsgraph.scene.rstr2, "use_taa", True) else 0
+            # Scene-level render settings (blRstr-parity panel + film).
+            sprops = getattr(depsgraph.scene, "rstr2", None)
+            sflags = 1 if getattr(sprops, "use_taa", True) else 0
+            if getattr(depsgraph.scene.render, "film_transparent", False):
+                sflags |= 2  # FLAG_FILM_TRANSPARENT
             settings = {
                 "flags": sflags,
-                "exposure": float(getattr(depsgraph.scene.rstr2, "exposure", 1.0)),
-                "history": float(getattr(depsgraph.scene.rstr2, "taa_history", 20)),
+                "exposure": float(getattr(sprops, "exposure", 1.0)),
+                "history": float(getattr(sprops, "taa_history", 20)),
             }
+            world = _world_light(depsgraph.scene)
+            if world is not None:
+                settings["world"] = list(world)
 
             ok = self._scene_writer.write(vertices, indices, camera, lights,
                                           albedos, settings)

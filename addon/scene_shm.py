@@ -68,6 +68,7 @@ VERSION = 2
 HEADER_SIZE = 256
 LIGHT_FLOATS = 16
 FLAG_TAA = 1
+FLAG_FILM_TRANSPARENT = 2
 MAX_SCENE_BYTES = 64 * 1024 * 1024  # 64 MB cap
 
 
@@ -148,7 +149,8 @@ class SceneWriter:
         lights: optional (L,16) float32 typed-light rows
         (px,py,pz,type,dx,dy,dz,intensity,cr,cg,cb,size_x,size_y,ax,ay,az);
         albedos: optional (n,3) float32 linear RGB per vertex;
-        settings: optional dict {flags:int, exposure:float, history:float}.
+        settings: optional dict {flags:int, exposure:float, history:float,
+        world:[r,g,b,strength] (uniform env light, 0 strength disables)}.
         Returns True if published."""
         if self._addr is None:
             return False
@@ -184,10 +186,14 @@ class SceneWriter:
             sflags = FLAG_TAA
             sexposure = 1.0
             shistory = 20.0
+            sworld = (0.0, 0.0, 0.0, 0.0)
             if settings:
                 sflags = int(settings.get("flags", sflags))
                 sexposure = float(settings.get("exposure", sexposure))
                 shistory = float(settings.get("history", shistory))
+                wv = settings.get("world")
+                if wv is not None and len(wv) == 4:
+                    sworld = tuple(float(x) for x in wv)
 
             vbytes = vcount * 3 * 4
             ibytes = icount * 4
@@ -211,7 +217,7 @@ class SceneWriter:
                 float(camera["tan_half_fov_y"]),
             )
             sig = (vbuf, ibuf, lbuf, abuf, cam_key,
-                   sflags, sexposure, shistory)
+                   sflags, sexposure, shistory, sworld)
             if sig == self._last_sig:
                 return True
             self._last_sig = sig
@@ -234,6 +240,9 @@ class SceneWriter:
             hdr.flags = ctypes.c_uint32(sflags)
             hdr.exposure = ctypes.c_float(sexposure)
             hdr.taa_history = ctypes.c_float(shistory)
+            # Reserved-area addendum: world color + strength (4 floats).
+            struct.pack_into("<4f", hdr.reserved, 0,
+                             sworld[0], sworld[1], sworld[2], sworld[3])
             for i in range(3):
                 hdr.cam_origin[i] = camera["origin"][i]
                 hdr.cam_right[i] = camera["right"][i]
