@@ -51,6 +51,9 @@ static __device__ __forceinline__ float3 normalize3(const float3& a) {
     float l = length3(a);
     return (l > 1e-8f) ? a * (1.0f / l) : make_float3(0.0f, 0.0f, 1.0f);
 }
+static __device__ __forceinline__ float3 v3(const rstr2::Vec3F& v) {
+    return make_float3(v.x, v.y, v.z);
+}
 
 // ---- RNG -------------------------------------------------------------------
 static __device__ __forceinline__ uint32_t rng_next(uint32_t& s) {
@@ -75,7 +78,7 @@ static __device__ __forceinline__ float3 camera_ray(unsigned int px, unsigned in
     float aspect = (float)params.width / (float)params.height;
     float uvx = (2.0f * u - 1.0f) * params.cam_tan_half_fov_y * aspect;
     float uvy = (1.0f - 2.0f * v) * params.cam_tan_half_fov_y; // row 0 = top
-    float3 dir = params.cam_forward + params.cam_right * uvx + params.cam_up * uvy;
+    float3 dir = v3(params.cam_forward) + v3(params.cam_right) * uvx + v3(params.cam_up) * uvy;
     return normalize3(dir);
 }
 
@@ -134,7 +137,7 @@ extern "C" __global__ void __raygen__rg_primary() {
     float4* g = (float4*)params.gbuf;
     g[2u * pidx].w = 0.0f; // mark no-hit until closest hit writes it
 
-    float3 origin = params.cam_origin;
+    float3 origin = v3(params.cam_origin);
     float3 dir = camera_ray(idx.x, idx.y);
 
     uint32_t p0 = 0u, p1 = 0u, p2 = 0u, p3 = 0u;
@@ -237,7 +240,10 @@ extern "C" __global__ void __raygen__rg_shade() {
     float3 Le = make_f3(L.cr, L.cg, L.cb) * L.intensity;
     float3 albedo = make_f3(0.8f, 0.8f, 0.82f);
     float3 f_r = albedo * (1.0f / 3.14159265f);
-    float3 color = W * f_r * Le * (float)vis;
+    float vis_f = (float)vis;
+    float3 color = make_float3(W * f_r.x * Le.x * vis_f,
+                               W * f_r.y * Le.y * vis_f,
+                               W * f_r.z * Le.z * vis_f);
 
     img[pidx] = make_float4(color.x, color.y, color.z, 1.0f);
 }
