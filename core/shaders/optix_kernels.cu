@@ -54,6 +54,17 @@ static __device__ __forceinline__ float3 normalize3(const float3& a) {
 static __device__ __forceinline__ float3 v3(const rstr2::Vec3F& v) {
     return make_float3(v.x, v.y, v.z);
 }
+// Narkowicz ACES filmic approximation, then sRGB gamma encode.
+static __device__ __forceinline__ float3 tonemap(const float3& x) {
+    const float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
+    float3 t = make_float3(
+        (x.x * (a * x.x + b)) / (x.x * (c * x.x + d) + e),
+        (x.y * (a * x.y + b)) / (x.y * (c * x.y + d) + e),
+        (x.z * (a * x.z + b)) / (x.z * (c * x.z + d) + e));
+    return make_float3(powf(fmaxf(t.x, 0.0f), 1.0f / 2.2f),
+                       powf(fmaxf(t.y, 0.0f), 1.0f / 2.2f),
+                       powf(fmaxf(t.z, 0.0f), 1.0f / 2.2f));
+}
 
 // ---- RNG -------------------------------------------------------------------
 static __device__ __forceinline__ uint32_t rng_next(uint32_t& s) {
@@ -217,7 +228,8 @@ extern "C" __global__ void __raygen__rg_shade() {
         float3 key = normalize3(make_f3(0.3f, 0.7f, -0.6f));
         float ndl = max(dot3(N, key), 0.0f);
         float3 col = base * (0.25f + 0.75f * ndl);
-        img[pidx] = make_float4(col.x, col.y, col.z, 1.0f);
+        float3 mapped = tonemap(col);
+        img[pidx] = make_float4(mapped.x, mapped.y, mapped.z, 1.0f);
         return;
     }
 
@@ -245,5 +257,6 @@ extern "C" __global__ void __raygen__rg_shade() {
                                W * f_r.y * Le.y * vis_f,
                                W * f_r.z * Le.z * vis_f);
 
-    img[pidx] = make_float4(color.x, color.y, color.z, 1.0f);
+    float3 mapped = tonemap(color);
+    img[pidx] = make_float4(mapped.x, mapped.y, mapped.z, 1.0f);
 }
