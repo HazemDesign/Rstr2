@@ -362,12 +362,7 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
     im->traversable = handle;
     CU_CHECK(cuStreamSynchronize(im->stream));
 
-    unsigned long long tri_count = 0;
-    optixAccelGetProperty(im->optix_ctx, im->traversable,
-                          OPTIX_ACCEL_PROPERTY_NUM_PUBLIC_TRIANGLES,
-                          &tri_count, sizeof(tri_count));
-    rlogf("Rstr2Core: GAS built (handle=%llu, public triangles=%llu)\n",
-          (unsigned long long)handle, (unsigned long long)tri_count);
+    rlogf("Rstr2Core: GAS built (handle=%llu)\n", (unsigned long long)handle);
     return true;
 }
 
