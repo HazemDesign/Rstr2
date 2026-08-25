@@ -27,12 +27,13 @@
 //   u32 writing      (1 while the writer is mid-update)
 //   u32 vertex_count (xyz triples)
 //   u32 index_count  (uint32 indices)
-//   u32 pad
+//   u32 light_count  (point lights, 8 floats each)
 //   float cam_origin[3], cam_right[3], cam_up[3], cam_forward[3]
 //   float cam_tan_half_fov_y
 //   (padded to 256)
 //   offset 256: vertices  (vertex_count * 3 * float32, world space)
 //   then      : indices   (index_count * uint32)
+//   then      : lights    (light_count * 8 * float32: px,py,pz,intensity,cr,cg,cb,pad)
 
 #pragma once
 
@@ -40,6 +41,8 @@
 #include <cstddef>
 #include <string>
 #include <vector>
+
+#include "optix_params.h"
 
 namespace rstr2 {
 
@@ -54,6 +57,7 @@ static constexpr size_t kMaxSceneBytes = 64 * 1024 * 1024; // 64 MB safety cap
 struct SceneData {
     std::vector<float> vertices;       // xyz, world space
     std::vector<uint32_t> indices;     // uint32 triangle indices
+    std::vector<PointLight> lights;    // point-light pool (RTXDI)
     float cam_origin[3] = {0, 0, 0};
     float cam_right[3] = {1, 0, 0};
     float cam_up[3] = {0, 1, 0};
@@ -70,7 +74,7 @@ struct SceneHeader {
     uint32_t writing;
     uint32_t vertex_count;
     uint32_t index_count;
-    uint32_t pad;
+    uint32_t light_count;
     float cam_origin[3];
     float cam_right[3];
     float cam_up[3];

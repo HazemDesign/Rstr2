@@ -135,14 +135,19 @@ bool SceneMem::consistent_copy(SceneData& out) {
 
     const size_t vbytes = static_cast<size_t>(vcount) * 3u * sizeof(float);
     const size_t ibytes = static_cast<size_t>(icount) * sizeof(uint32_t);
-    if (vbytes + ibytes > kMaxSceneBytes) return false;
+    const uint32_t lcount = hdr->light_count;
+    const size_t lbytes = static_cast<size_t>(lcount) * 8u * sizeof(float);
+    if (vbytes + ibytes + lbytes > kMaxSceneBytes) return false;
 
     const uint8_t* base = reinterpret_cast<const uint8_t*>(view_);
     const float* vptr = reinterpret_cast<const float*>(base + kSceneHeaderSize);
     const uint32_t* iptr = reinterpret_cast<const uint32_t*>(base + kSceneHeaderSize + vbytes);
+    const PointLight* lptr = reinterpret_cast<const PointLight*>(
+        base + kSceneHeaderSize + vbytes + ibytes);
 
     out.vertices.assign(vptr, vptr + static_cast<size_t>(vcount) * 3u);
     out.indices.assign(iptr, iptr + icount);
+    out.lights.assign(lptr, lptr + lcount);
 
     for (int i = 0; i < 3; ++i) {
         out.cam_origin[i] = hdr->cam_origin[i];

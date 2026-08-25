@@ -136,7 +136,24 @@ def _extract_scene(depsgraph):
 
     vertices = np.concatenate(vert_chunks, axis=0)
     indices = np.concatenate(idx_chunks, axis=0) if idx_chunks else np.empty((0,), dtype=np.uint32)
-    return vertices, indices, cam
+
+    # --- Point lights (world space) --------------------------------------
+    light_rows = []
+    for obj in depsgraph.objects:
+        if obj.type != "LIGHT":
+            continue
+        ld = obj.data
+        mw = obj.matrix_world
+        pos = (float(mw[0][3]), float(mw[1][3]), float(mw[2][3]))
+        energy = float(getattr(ld, "energy", 10.0))
+        col = ld.color
+        cr, cg, cb = float(col[0]), float(col[1]), float(col[2])
+        intensity = energy * 0.1  # scale Blender energy into our radiance range
+        light_rows.append([pos[0], pos[1], pos[2], intensity, cr, cg, cb, 0.0])
+    lights = (np.array(light_rows, dtype=np.float32).reshape(-1, 8)
+              if light_rows else np.empty((0, 8), dtype=np.float32))
+
+    return vertices, indices, cam, lights
 
 
 class Rstr2Engine(RenderEngine):
@@ -339,9 +356,9 @@ class Rstr2Engine(RenderEngine):
             self._dbg = "scene map n/a"
             return
         try:
-            vertices, indices, camera = scene
-            ok = self._scene_writer.write(vertices, indices, camera)
-            self._dbg = ("scene %d v / %d i" % (vertices.shape[0], indices.shape[0])) if ok else "scene write fail"
+            vertices, indices, camera, lights = scene
+            ok = self._scene_writer.write(vertices, indices, camera, lights)
+            self._dbg = ("scene %d v / %d i / %d L" % (vertices.shape[0], indices.shape[0], lights.shape[0])) if ok else "scene write fail"
         except Exception as e:
             self._dbg = "scene err: %s" % str(e)[:60]
 

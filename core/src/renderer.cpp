@@ -115,6 +115,15 @@ struct Renderer::Impl {
 
     CUdeviceptr      d_params       = 0;   // launch params buffer
 
+    // RTXDI (ReSTIR DI) state.
+    CUdeviceptr      d_gbuf         = 0;   // 2*N float4: [pos.xyz,hit], [normal.xyz,_]
+    CUdeviceptr      d_res[2]        = {0, 0}; // two reservoir buffers (ping-pong)
+    CUdeviceptr      d_lights       = 0;   // point-light pool
+    size_t           gbuf_bytes     = 0;
+    size_t           res_bytes      = 0;
+    size_t           light_bytes    = 0;
+    uint32_t         frame_index    = 0;
+
     ~Impl() {
         if (d_output)       cuMemFree(d_output);
         if (d_vertices)     cuMemFree(d_vertices);
@@ -123,6 +132,10 @@ struct Renderer::Impl {
         if (d_gas_scratch)  cuMemFree(d_gas_scratch);
         if (d_sbt_records)  cuMemFree(d_sbt_records);
         if (d_params)       cuMemFree(d_params);
+        if (d_gbuf)         cuMemFree(d_gbuf);
+        if (d_res[0])       cuMemFree(d_res[0]);
+        if (d_res[1])       cuMemFree(d_res[1]);
+        if (d_lights)       cuMemFree(d_lights);
         if (pipeline)       optixPipelineDestroy(pipeline);
         if (hitgroup_pg)    optixProgramGroupDestroy(hitgroup_pg);
         if (miss_pg)        optixProgramGroupDestroy(miss_pg);
@@ -196,7 +209,7 @@ struct Renderer::Impl {
         OptixPipelineCompileOptions pco = {};
         pco.usesMotionBlur = 0;
         pco.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
-        pco.numPayloadValues = 3;
+        pco.numPayloadValues = 4;
         pco.numAttributeValues = 2;
         pco.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
         pco.pipelineLaunchParamsVariableName = "params";
@@ -208,53 +221,60 @@ struct Renderer::Impl {
                                      &log_size, &module));
         if (log[0]) rlogf("Rstr2Core: [optix module] %s", log);
 
-        OptixProgramGroupDesc descs[3] = {};
+        OptixProgramGroupDesc descs[4] = {};
         descs[0].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
         descs[0].raygen.module = module;
-        descs[0].raygen.entryFunctionName = "__raygen__rg";
+        descs[0].raygen.entryFunctionName = "__raygen__rg_primary";
 
-        descs[1].kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
-        descs[1].miss.module = module;
-        descs[1].miss.entryFunctionName = "__miss__ms";
+        descs[1].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+        descs[1].raygen.module = module;
+        descs[1].raygen.entryFunctionName = "__raygen__rg_shade";
 
-        descs[2].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-        descs[2].hitgroup.moduleCH = module;
-        descs[2].hitgroup.entryFunctionNameCH = "__closesthit__ch";
+        descs[2].kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
+        descs[2].miss.module = module;
+        descs[2].miss.entryFunctionName = "__miss__ms";
 
-        OptixProgramGroup pgs[3] = {};
+        descs[3].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+        descs[3].hitgroup.moduleCH = module;
+        descs[3].hitgroup.entryFunctionNameCH = "__closesthit__ch";
+
+        OptixProgramGroup pgs[4] = {};
         OptixProgramGroupOptions pg_opts = {};
-        OPTIX_CHECK(optixProgramGroupCreate(optix_ctx, descs, 3, &pg_opts,
+        OPTIX_CHECK(optixProgramGroupCreate(optix_ctx, descs, 4, &pg_opts,
                                             log, &log_size, pgs));
         if (log[0]) rlogf("Rstr2Core: [optix pgs] %s", log);
         raygen_pg = pgs[0];
-        miss_pg = pgs[1];
-        hitgroup_pg = pgs[2];
+        miss_pg = pgs[2];
+        hitgroup_pg = pgs[3];
 
         OptixPipelineLinkOptions link_opts = {};
         link_opts.maxTraceDepth = 1;
-        OPTIX_CHECK(optixPipelineCreate(optix_ctx, &pco, &link_opts, pgs, 3,
-                                        log, &log_size, &pipeline));
+        OPTIX_CHECK(optixPipelineCreate(optix_ctx, &pco, &link_opts, pgs, 4,
+                                         log, &log_size, &pipeline));
         if (log[0]) rlogf("Rstr2Core: [optix pipeline] %s", log);
 
-        // Shader binding table: one packed record per program group.
+        // Shader binding table: [rg_primary, rg_shade, miss, hit].
         const size_t rec = OPTIX_SBT_RECORD_HEADER_SIZE;
-        char rg[OPTIX_SBT_RECORD_HEADER_SIZE];
+        char rg0[OPTIX_SBT_RECORD_HEADER_SIZE];
+        char rg1[OPTIX_SBT_RECORD_HEADER_SIZE];
         char ms[OPTIX_SBT_RECORD_HEADER_SIZE];
         char hg[OPTIX_SBT_RECORD_HEADER_SIZE];
-        OPTIX_CHECK(optixSbtRecordPackHeader(raygen_pg, rg));
+        OPTIX_CHECK(optixSbtRecordPackHeader(pgs[0], rg0));
+        OPTIX_CHECK(optixSbtRecordPackHeader(pgs[1], rg1));
         OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, ms));
         OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, hg));
 
-        CU_CHECK(cuMemAlloc(&d_sbt_records, rec * 3));
-        CU_CHECK(cuMemcpyHtoD(d_sbt_records + rec * 0, rg, rec));
-        CU_CHECK(cuMemcpyHtoD(d_sbt_records + rec * 1, ms, rec));
-        CU_CHECK(cuMemcpyHtoD(d_sbt_records + rec * 2, hg, rec));
+        CU_CHECK(cuMemAlloc(&d_sbt_records, rec * 4));
+        CU_CHECK(cuMemcpyHtoD(d_sbt_records + rec * 0, rg0, rec));
+        CU_CHECK(cuMemcpyHtoD(d_sbt_records + rec * 1, rg1, rec));
+        CU_CHECK(cuMemcpyHtoD(d_sbt_records + rec * 2, ms, rec));
+        CU_CHECK(cuMemcpyHtoD(d_sbt_records + rec * 3, hg, rec));
 
-        sbt.raygenRecord = d_sbt_records;
-        sbt.missRecordBase = d_sbt_records + rec * 1;
+        sbt.raygenRecord = d_sbt_records;                       // toggled per launch
+        sbt.missRecordBase = d_sbt_records + rec * 2;
         sbt.missRecordStrideInBytes = (unsigned int)rec;
         sbt.missRecordCount = 1;
-        sbt.hitgroupRecordBase = d_sbt_records + rec * 2;
+        sbt.hitgroupRecordBase = d_sbt_records + rec * 3;
         sbt.hitgroupRecordStrideInBytes = (unsigned int)rec;
         sbt.hitgroupRecordCount = 1;
 
@@ -282,6 +302,19 @@ bool Renderer::init(int width, int height, std::string& error) {
     const size_t out_bytes = static_cast<size_t>(width) * height * 16u;
     CU_CHECK(cuMemAlloc(&impl_->d_output, out_bytes));
     CU_CHECK(cuMemAlloc(&impl_->d_params, sizeof(Params)));
+
+    // G-buffer (2 float4/pixel) + two reservoir ping-pong buffers.
+    const size_t gbuf_bytes = static_cast<size_t>(width) * height * 2u * 16u;
+    const size_t res_bytes = static_cast<size_t>(width) * height * sizeof(Reservoir);
+    CU_CHECK(cuMemAlloc(&impl_->d_gbuf, gbuf_bytes));
+    CU_CHECK(cuMemAlloc(&impl_->d_res[0], res_bytes));
+    CU_CHECK(cuMemAlloc(&impl_->d_res[1], res_bytes));
+    // Reservoirs must start empty (M=0) so the first frame has no bogus
+    // temporal neighbour.
+    CU_CHECK(cuMemsetD8(impl_->d_res[0], 0, res_bytes));
+    CU_CHECK(cuMemsetD8(impl_->d_res[1], 0, res_bytes));
+    impl_->gbuf_bytes = gbuf_bytes;
+    impl_->res_bytes = res_bytes;
 
     // Module + program groups + pipeline.
     if (!impl_->create_module_and_pipeline(error)) return false;
@@ -323,6 +356,15 @@ bool Renderer::set_scene(const SceneData& scene, std::string& error) {
     CU_CHECK(cuMemAlloc(&im->d_indices, im->idx_bytes));
     CU_CHECK(cuMemcpyHtoD(im->d_vertices, scene_.vertices.data(), im->vert_bytes));
     CU_CHECK(cuMemcpyHtoD(im->d_indices, scene_.indices.data(), im->idx_bytes));
+
+    // Lights (RTXDI candidate pool). Reallocated if the count changed.
+    const size_t lbytes = scene_.lights.size() * sizeof(PointLight);
+    if (im->d_lights) { cuMemFree(im->d_lights); im->d_lights = 0; im->light_bytes = 0; }
+    if (lbytes > 0) {
+        CU_CHECK(cuMemAlloc(&im->d_lights, lbytes));
+        CU_CHECK(cuMemcpyHtoD(im->d_lights, scene_.lights.data(), lbytes));
+        im->light_bytes = lbytes;
+    }
 
     // Build a single triangle-array GAS from the indexed mesh. Disable face
     // culling so geometry is visible regardless of index winding.
@@ -372,6 +414,11 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     Impl* im = impl_;
     if (!im || !im->optix_ctx) { error = "Rstr2: renderer not initialized."; return false; }
 
+    // Ping-pong the two reservoir buffers across frames.
+    const int cur = static_cast<int>(im->frame_index & 1u);
+    const int prev = cur ^ 1;
+    const size_t rec = OPTIX_SBT_RECORD_HEADER_SIZE;
+
     Params p;
     memset(&p, 0, sizeof(p));
     p.image = reinterpret_cast<Vec4F*>(im->d_output);
@@ -386,8 +433,26 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     p.cam_tan_half_fov_y = scene_.cam_tan_half_fov_y;
     p.handle = im->traversable;
 
+    // RTXDI state.
+    p.lights = reinterpret_cast<PointLight*>(im->d_lights);
+    p.light_count = static_cast<unsigned int>(scene_.lights.size());
+    p.gbuf = reinterpret_cast<Vec4F*>(im->d_gbuf);
+    p.reservoirs = reinterpret_cast<Reservoir*>(im->d_res[cur]);
+    p.prev_reservoirs = reinterpret_cast<Reservoir*>(im->d_res[prev]);
+    p.frame_index = im->frame_index;
+
     CU_CHECK(cuMemcpyHtoD(im->d_params, &p, sizeof(Params)));
 
+    // Pass 1: primary ray + ReSTIR DI reservoir build (temporal reuse).
+    im->sbt.raygenRecord = im->d_sbt_records + rec * 0;
+    OPTIX_CHECK(optixLaunch(im->pipeline, im->stream, im->d_params,
+                            sizeof(Params), &im->sbt,
+                            static_cast<unsigned int>(width_),
+                            static_cast<unsigned int>(height_), 1));
+    CU_CHECK(cuStreamSynchronize(im->stream));
+
+    // Pass 2: shade using the selected light + a single shadow ray.
+    im->sbt.raygenRecord = im->d_sbt_records + rec * 1;
     OPTIX_CHECK(optixLaunch(im->pipeline, im->stream, im->d_params,
                             sizeof(Params), &im->sbt,
                             static_cast<unsigned int>(width_),
@@ -397,8 +462,7 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     const size_t out_bytes = static_cast<size_t>(width_) * height_ * 16u;
     CU_CHECK(cuMemcpyDtoH(out_pixels, im->d_output, out_bytes));
 
-    static bool s_first2 = true;
-    if (s_first2) { s_first2 = false; rlogf("Rstr2Core: first frame rendered OK\n"); }
+    im->frame_index++;
     return true;
 }
 

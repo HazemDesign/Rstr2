@@ -10,14 +10,15 @@
 #     u32 epoch        (incremented LAST on each update)
 #     u32 ready        (1 = valid)
 #     u32 writing      (1 while we are mid-update)
-#     u32 vertex_count (xyz triples)
-#     u32 index_count  (uint32 indices)
-#     u32 pad
-#     float cam_origin[3], cam_right[3], cam_up[3], cam_forward[3]
-#     float cam_tan_half_fov_y
-#     (padded to 256)
+#   u32 vertex_count (xyz triples)
+#   u32 index_count  (uint32 indices)
+#   u32 light_count  (point lights, 8 floats each)
+#   float cam_origin[3], cam_right[3], cam_up[3], cam_forward[3]
+#   float cam_tan_half_fov_y
+#   (padded to 256)
 #   offset 256: vertices  (vertex_count * 3 * float32, world space)
 #   then      : indices   (index_count * uint32)
+#   then      : lights    (light_count * 8 * float32: px,py,pz,intensity,cr,cg,cb,pad)
 
 import ctypes
 import struct
@@ -66,7 +67,7 @@ class _SceneHeader(ctypes.Structure):
         ("writing", ctypes.c_uint32),
         ("vertex_count", ctypes.c_uint32),
         ("index_count", ctypes.c_uint32),
-        ("pad", ctypes.c_uint32),
+        ("light_count", ctypes.c_uint32),
         ("cam_origin", ctypes.c_float * 3),
         ("cam_right", ctypes.c_float * 3),
         ("cam_up", ctypes.c_float * 3),
@@ -122,10 +123,11 @@ class SceneWriter:
         return self._addr is not None
 
     # ------------------------------------------------------------------
-    def write(self, vertices, indices, camera):
+    def write(self, vertices, indices, camera, lights=None):
         """vertices: (n,3) float32 world space; indices: (m,) uint32;
         camera: dict with origin/right/up/forward (each (3,) float) and
-        tan_half_fov_y float. Returns True if published."""
+        tan_half_fov_y float; lights: optional (L,8) float32 array with
+        [px,py,pz,intensity,cr,cg,cb,pad] per light. Returns True if published."""
         if self._addr is None:
             return False
         try:
@@ -134,9 +136,17 @@ class SceneWriter:
             if vcount == 0 or icount == 0 or (icount % 3) != 0:
                 return False
 
+            lcount = 0
+            lbuf = b""
+            lbytes = 0
+            if lights is not None and lights.size:
+                lcount = int(lights.shape[0])
+                lbuf = np.ascontiguousarray(lights, dtype=np.float32).ravel().tobytes()
+                lbytes = len(lbuf)
+
             vbytes = vcount * 3 * 4
             ibytes = icount * 4
-            if vbytes + ibytes > self._max_bytes:
+            if vbytes + ibytes + lbytes > self._max_bytes:
                 return False
 
             hdr = _SceneHeader.from_buffer_copy(ctypes.string_at(self._addr, HEADER_SIZE))
@@ -145,7 +155,7 @@ class SceneWriter:
             hdr.ready = 0
             ctypes.memmove(self._addr, ctypes.byref(hdr), HEADER_SIZE)
 
-            # Copy vertices then indices into the view.
+            # Copy vertices, indices, then lights into the view.
             vbuf = np.ascontiguousarray(vertices, dtype=np.float32).ravel().tobytes()
             ibuf = np.ascontiguousarray(indices, dtype=np.uint32).ravel().tobytes()
             cam_key = (
@@ -155,19 +165,23 @@ class SceneWriter:
                 tuple(float(x) for x in camera["forward"]),
                 float(camera["tan_half_fov_y"]),
             )
-            sig = (vbuf, ibuf, cam_key)
+            sig = (vbuf, ibuf, lbuf, cam_key)
             if sig == self._last_sig:
                 return True
             self._last_sig = sig
 
             vdst = self._addr + HEADER_SIZE
             idst = self._addr + HEADER_SIZE + vbytes
+            ldst = self._addr + HEADER_SIZE + vbytes + ibytes
             ctypes.memmove(vdst, vbuf, vbytes)
             ctypes.memmove(idst, ibuf, ibytes)
+            if lbytes:
+                ctypes.memmove(ldst, lbuf, lbytes)
 
             # Fill header + camera, bump epoch LAST, clear writing.
             hdr.vertex_count = ctypes.c_uint32(vcount)
             hdr.index_count = ctypes.c_uint32(icount)
+            hdr.light_count = ctypes.c_uint32(lcount)
             for i in range(3):
                 hdr.cam_origin[i] = camera["origin"][i]
                 hdr.cam_right[i] = camera["right"][i]
