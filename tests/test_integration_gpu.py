@@ -168,7 +168,12 @@ class CoreIntegration(unittest.TestCase):
         inside = float(np.mean(self._px(img, 0.75, 0.45)))
         outside = float(np.mean(self._px(img, 0.10, 0.15)))
         self.assertGreater(inside, 0.3, "cone interior must be lit")
-        self.assertLess(outside, 0.01, "outside cone must be black")
+        # With GI (Phase 5) the lit interior bounces onto the dark exterior, so
+        # the outside is no longer perfectly black - but the direct cone must
+        # dominate: inside is far brighter and the indirect floor stays small.
+        self.assertGreater(inside, outside * 3.0,
+                           "direct cone must dominate indirect bounce")
+        self.assertLess(outside, 0.08, "indirect bounce onto exterior must stay small")
 
     def test_04_world_ambient_tints_and_scales(self):
         v, i, c = wall_scene()
@@ -220,6 +225,47 @@ class CoreIntegration(unittest.TestCase):
         b = self._settle(frames=30)
         diff = abs(float(a[:, :, :3].mean()) - float(b[:, :, :3].mean()))
         self.assertLess(diff, 2e-3, "static scene must converge to stable mean")
+
+    # ------------------------------------------------------------------
+    def test_08_gi_bounce_lights_occluded_receiver(self):
+        # L-shaped corner: a floor (normal +y) and a back wall (normal +z).
+        # A point light high above the floor lights the floor directly but is
+        # back-facing to the wall, so the wall is lit ONLY by a GI bounce off
+        # the floor. With max_bounces >= 1 the wall must be visibly lit; with
+        # world disabled this proves inter-reflection (not env fill).
+        verts = np.array([
+            # floor (y=0, normal +y)
+            [-3, 0, 0], [3, 0, 0], [3, 0, -3],
+            [-3, 0, 0], [3, 0, -3], [-3, 0, -3],
+            # back wall (z=0, y 0..3, normal +z)
+            [-3, 0, 0], [3, 0, 0], [3, 3, 0],
+            [-3, 0, 0], [3, 3, 0], [-3, 3, 0],
+        ], dtype=np.float32)
+        inds = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+                        dtype=np.uint32)
+        cam = {"origin": (0.0, 1.5, 6.0), "right": (1.0, 0.0, 0.0),
+               "up": (0.0, 1.0, 0.0), "forward": (0.0, 0.0, -1.0),
+               "tan_half_fov_y": 0.55}
+        light = np.array([[0.0, 4.0, -1.5, 0.0, 0, 0, 0, 15.0,
+                           1, 1, 1, 0, 0, 0, 0, 0]], dtype=np.float32)
+        self._publish(verts, inds, cam, lights=light,
+                      settings={"flags": 1, "history": 24,
+                                "world": [0.0, 0.0, 0.0, 0.0]})
+        img = self._settle()
+        # The back wall (normal +z, light behind it) gets NO direct light and
+        # world is off, so any wall illumination is purely GI inter-reflection.
+        # Sample the wall band (upper screen) and the global brightest pixel
+        # (the directly-lit floor hotspot) to confirm indirect < direct.
+        wall_max = 0.0
+        for fy in (0.5, 0.55, 0.6, 0.65, 0.7, 0.75):
+            for fx in (0.35, 0.45, 0.5, 0.55, 0.65):
+                wall_max = max(wall_max, float(np.mean(self._px(img, fx, fy)[:3])))
+        direct_max = float(img[:, :, :3].max())
+        self.assertGreater(wall_max, 0.02,
+                           "back wall must be lit by GI bounce (got %.4f)" % wall_max)
+        self.assertLess(wall_max, direct_max * 0.8,
+                        "indirect wall must be dimmer than direct floor hotspot")
+        self.assertLess(wall_max, 0.9, "wall must not be over-bright (GI bug)")
 
 
 if __name__ == "__main__":
