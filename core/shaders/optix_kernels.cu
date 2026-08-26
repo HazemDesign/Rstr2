@@ -10,6 +10,10 @@
 // Pass 2 (rg_shade): read the G-buffer + reservoir, cast ONE shadow ray for
 // the selected light sample, accumulate linear HDR color temporally
 // (exponential moving average = TAA), then tonemap to the display buffer.
+// Phase 5: after the direct term, spawn cosine-weighted secondary rays for
+// global illumination. Each secondary hit is written to a dedicated bounce
+// buffer (so the primary G-buffer survives) and shaded with a 1-spp light
+// estimate; a miss reaches the environment (world radiance).
 //
 // The miss/closest-hit programs are shared and branch on the ray-type payload
 // (0 = primary, 1 = shadow).
@@ -38,6 +42,11 @@ static __device__ __forceinline__ float3 operator*(const float3& a, float s) {
 }
 static __device__ __forceinline__ float3 operator*(float s, const float3& a) {
     return make_float3(a.x * s, a.y * s, a.z * s);
+}
+// Componentwise product (CUDA has no float3*float3 - it miscompiles; see
+// AGENTS.md "hard-won constraints").
+static __device__ __forceinline__ float3 mul3(const float3& a, const float3& b) {
+    return make_float3(a.x * b.x, a.y * b.y, a.z * b.z);
 }
 static __device__ __forceinline__ float dot3(const float3& a, const float3& b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
@@ -179,12 +188,63 @@ static __device__ __forceinline__ float3 camera_ray(float px, float py) {
     return normalize3(dir);
 }
 
+// ---- cosine-weighted hemisphere sampling (Lambertian bounce) ----------------
+static __device__ float3 cosine_sample_hemisphere(const float3& N, uint32_t& seed) {
+    float3 up = (fabsf(N.z) < 0.999f) ? make_f3(0.0f, 0.0f, 1.0f)
+                                      : make_f3(1.0f, 0.0f, 0.0f);
+    float3 t = normalize3(cross3(up, N));
+    float3 b = cross3(N, t);
+    float r1 = rng_f(seed);
+    float r2 = rng_f(seed);
+    float phi = 6.2831853f * r1;
+    float r = sqrtf(r2);
+    float x = r * cosf(phi);
+    float y = r * sinf(phi);
+    float z = sqrtf(fmaxf(0.0f, 1.0f - r2));
+    return normalize3(t * x + b * y + N * z);
+}
+
+// Single-sample direct lighting at an arbitrary point (used for GI bounces).
+// Picks one light uniformly (prob 1/NL); the per-sample weight for a uniform
+// pick is NL * G, matching the ReSTIR DI estimator form used for the primary
+// hit so the two agree. Returns f_r * Le * vis * (NL*G) for the single sample.
+static __device__ float3 estimate_direct_1spp(const float3& P, const float3& N,
+                                              const float3& albedo,
+                                              uint32_t& seed) {
+    uint32_t NL = params.light_count;
+    if (NL == 0u) return make_f3(0.0f, 0.0f, 0.0f);
+    uint32_t li = rng_next(seed) % NL;
+    rstr2::Light L = params.lights[li];
+    float3 sp, Ld;
+    float dist, G;
+    sample_light(L, P, N, seed, sp, Ld, dist, G);
+    if (G <= 0.0f) return make_f3(0.0f, 0.0f, 0.0f);
+
+    // Ld/dist come straight from sample_light (already jittered for sun/point/
+    // spot soft shadows and correct for area emitters).
+    float tmax = fmaxf(dist - 2.0f * 1e-3f, 1e-3f);
+    uint32_t q0 = 1u, q1 = 0u, q2 = 0u, q3 = 0u;
+    optixTrace(params.handle, P + N * 1e-3f, Ld, 1e-3f, tmax, 0.0f,
+               OptixVisibilityMask(255), OPTIX_RAY_FLAG_NONE,
+               0u, 1u, 0u, q0, q1, q2, q3);
+    float vis = (float)q1;
+    if (vis <= 0.0f) return make_f3(0.0f, 0.0f, 0.0f);
+
+    float3 Le = make_f3(L.cr, L.cg, L.cb) * L.intensity;
+    float3 f_r = albedo * (1.0f / 3.14159265f);
+    float W = (float)NL * G;
+    return make_float3(W * f_r.x * Le.x, W * f_r.y * Le.y, W * f_r.z * Le.z);
+}
+
 // ============================ MISS ==========================================
 extern "C" __global__ void __miss__ms() {
     uint32_t rt = optixGetPayload_0();
     if (rt == 1u) {
         // Shadow ray reached the sky with no occluder -> visible.
         optixSetPayload_1(1u);
+    } else if (rt == 2u) {
+        // Secondary (GI) ray reached the environment -> no surface hit.
+        optixSetPayload_1(0u);
     }
     // Primary miss: nothing to do (G-buffer hit flag stays 0).
 }
@@ -225,6 +285,18 @@ extern "C" __global__ void __closesthit__ch() {
     if (params.albedos) {
         rstr2::Vec3F a = params.albedos[i0];
         alb = make_f3(a.x, a.y, a.z);
+    }
+
+    if (rt == 2u) {
+        // Secondary (GI) hit: write to the per-pixel bounce buffer so the
+        // primary G-buffer (used for the final present) is preserved. The
+        // shading pass reads this after the trace and continues the path.
+        float4* bb = (float4*)params.bounce_buf;
+        bb[3u * pidx + 0u] = make_float4(P.x, P.y, P.z, 1.0f);
+        bb[3u * pidx + 1u] = make_float4(ng.x, ng.y, ng.z, 0.0f);
+        bb[3u * pidx + 2u] = make_float4(alb.x, alb.y, alb.z, 0.0f);
+        optixSetPayload_1(1u);
+        return;
     }
 
     float4* g = (float4*)params.gbuf;
@@ -357,19 +429,17 @@ extern "C" __global__ void __raygen__rg_shade() {
     float3 N = make_f3(g[3u * pidx + 1u].x, g[3u * pidx + 1u].y, g[3u * pidx + 1u].z);
     float3 albedo = make_f3(g[3u * pidx + 2u].x, g[3u * pidx + 2u].y, g[3u * pidx + 2u].z);
 
-    // Uniform world/environment ambient on surfaces (approximation).
-    float3 ambient = make_f3(0.0f, 0.0f, 0.0f);
-    if (params.world_strength > 0.0f) {
-        float ws = params.world_strength;
-        ambient = make_float3(albedo.x * ws * params.world_r,
-                              albedo.y * ws * params.world_g,
-                              albedo.z * ws * params.world_b);
-    }
-
     uint32_t NL = params.light_count;
 
-    // Fallback shading when no lights are provided (default scene).
+    // Fallback shading when no analytic lights are provided (default scene).
     if (NL == 0u) {
+        float3 ambient = make_f3(0.0f, 0.0f, 0.0f);
+        if (params.world_strength > 0.0f) {
+            float ws = params.world_strength;
+            ambient = make_float3(albedo.x * ws * params.world_r,
+                                  albedo.y * ws * params.world_g,
+                                  albedo.z * ws * params.world_b);
+        }
         float3 key = normalize3(make_f3(0.3f, 0.7f, -0.6f));
         float ndl = max(dot3(N, key), 0.0f);
         float3 col = albedo * (0.25f + 0.75f * ndl) + ambient;
@@ -377,42 +447,65 @@ extern "C" __global__ void __raygen__rg_shade() {
         return;
     }
 
+    // ---- Primary direct lighting via the ReSTIR DI reservoir. ----
+    float3 L = make_f3(0.0f, 0.0f, 0.0f);
     rstr2::Reservoir r = params.reservoirs[pidx];
-    if (r.M == 0u || r.lightIdx >= NL || r.wsum <= 0.0f) {
-        // No usable light sample this frame - world ambient only.
-        accumulate_and_present(pidx, ambient, 1.0f);
-        return;
+    if (r.M > 0u && r.lightIdx < NL && r.wsum > 0.0f) {
+        float W = r.wsum / max((float)r.M, 1.0f);
+        rstr2::Light Ll = params.lights[r.lightIdx];
+        uint32_t type = (uint32_t)(Ll.type + 0.5f);
+        float3 Ld;
+        float tmax;
+        if (type == LIGHT_SUN) {
+            Ld = normalize3(make_f3(-Ll.dx, -Ll.dy, -Ll.dz));
+            tmax = 1e8f;
+        } else {
+            float3 sp = make_f3(r.sx, r.sy, r.sz);
+            float3 toS = sp - P;
+            float ds = length3(toS);
+            Ld = (ds > 1e-6f) ? toS * (1.0f / ds) : N;
+            tmax = fmaxf(ds - 2.0f * 1e-3f, 1e-3f);
+        }
+        uint32_t p0 = 1u, p1 = 0u, p2 = 0u, p3 = 0u;
+        optixTrace(params.handle, P + N * 1e-3f, Ld, 1e-3f, tmax, 0.0f,
+                   OptixVisibilityMask(255), OPTIX_RAY_FLAG_NONE,
+                   0u, 1u, 0u, p0, p1, p2, p3);
+        float vis = (float)p1;
+        float3 Le = make_f3(Ll.cr, Ll.cg, Ll.cb) * Ll.intensity;
+        float3 f_r = albedo * (1.0f / 3.14159265f);
+        L = make_float3(W * f_r.x * Le.x * vis,
+                        W * f_r.y * Le.y * vis,
+                        W * f_r.z * Le.z * vis);
     }
-    float W = r.wsum / max((float)r.M, 1.0f);
 
-    rstr2::Light L = params.lights[r.lightIdx];
-    uint32_t type = (uint32_t)(L.type + 0.5f);
+    // ---- Indirect global illumination bounces (Phase 5). ----
+    // Lambertian throughput: each diffuse bounce multiplies throughput by the
+    // surface albedo (the ndl / pdf cosine terms cancel). The environment is
+    // reached when a secondary ray misses (multiplied by current throughput).
+    float3 thr = make_f3(1.0f, 1.0f, 1.0f);
+    float3 curP = P, curN = N, curAlb = albedo;
+    uint32_t seed = pixel_seed(pidx, params.frame_index, 7u);
+    for (uint32_t b = 0u; b < params.max_bounces; ++b) {
+        float3 dir = cosine_sample_hemisphere(curN, seed);
+        uint32_t p0 = 2u, p1 = 0u, p2 = 0u, p3 = 0u;
+        optixTrace(params.handle, curP + curN * 1e-3f, dir, 1e-3f, 1e16f, 0.0f,
+                   OptixVisibilityMask(255), OPTIX_RAY_FLAG_NONE,
+                   0u, 1u, 0u, p0, p1, p2, p3);
+        if (p1 == 0u) {
+            L += mul3(thr, world_radiance());   // env contribution along this path
+            break;
+        }
+        float4* bb = (float4*)params.bounce_buf;
+        float3 P2 = make_f3(bb[3u * pidx + 0u].x, bb[3u * pidx + 0u].y, bb[3u * pidx + 0u].z);
+        float3 N2 = make_f3(bb[3u * pidx + 1u].x, bb[3u * pidx + 1u].y, bb[3u * pidx + 1u].z);
+        float3 alb2 = make_f3(bb[3u * pidx + 2u].x, bb[3u * pidx + 2u].y, bb[3u * pidx + 2u].z);
 
-    // Shadow ray toward the stored stochastic light sample.
-    float3 Ld;
-    float tmax;
-    if (type == LIGHT_SUN) {
-        Ld = normalize3(make_f3(-L.dx, -L.dy, -L.dz));
-        tmax = 1e8f;
-    } else {
-        float3 sp = make_f3(r.sx, r.sy, r.sz);
-        float3 toS = sp - P;
-        float ds = length3(toS);
-        Ld = (ds > 1e-6f) ? toS * (1.0f / ds) : N;
-        tmax = fmaxf(ds - 2.0f * 1e-3f, 1e-3f);
+        thr = mul3(thr, curAlb);
+        float3 direct2 = estimate_direct_1spp(P2, N2, alb2, seed);
+        L += mul3(thr, direct2);
+
+        curP = P2; curN = N2; curAlb = alb2;
     }
 
-    uint32_t p0 = 1u, p1 = 0u, p2 = 0u, p3 = 0u;
-    optixTrace(params.handle, P + N * 1e-3f, Ld, 1e-3f, tmax, 0.0f,
-               OptixVisibilityMask(255), OPTIX_RAY_FLAG_NONE,
-               0u, 1u, 0u, p0, p1, p2, p3);
-    float vis = (float)p1;
-
-    float3 Le = make_f3(L.cr, L.cg, L.cb) * L.intensity;
-    float3 f_r = albedo * (1.0f / 3.14159265f);
-    float3 color = make_float3(W * f_r.x * Le.x * vis,
-                               W * f_r.y * Le.y * vis,
-                               W * f_r.z * Le.z * vis) + ambient;
-
-    accumulate_and_present(pidx, color, 1.0f);
+    accumulate_and_present(pidx, L, 1.0f);
 }

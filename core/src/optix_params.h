@@ -93,6 +93,11 @@ struct Params {
     float         world_r, world_g, world_b;  // uniform env radiance
     float         world_strength;             // 0 disables world light
     unsigned int  film_transparent;           // alpha=0 for background pixels
+
+    // --- Indirect GI (Phase 5) ------------------------------------------
+    Vec4F*        bounce_buf;   // 3*N float4: secondary-hit [pos.xyz,hit],
+                                // [normal.xyz,_], [albedo.rgb,_]
+    unsigned int  max_bounces;  // GI bounces (0 = direct lighting only)
 };
 
 } // namespace rstr2

@@ -71,6 +71,7 @@ static void optix_log_cb(unsigned int level, const char* tag,
 // Default fallback scene: a single triangle + the matching camera. Matches the
 // previous DXR default so we always have something to render before/without
 // the addon scene bridge.
+static const unsigned int kMaxBounces = 1u;   // one indirect GI bounce (Phase 5)
 SceneData make_default_scene() {
     SceneData s;
     s.vertices = {
@@ -121,6 +122,7 @@ struct Renderer::Impl {
     CUdeviceptr      d_lights       = 0;   // typed-light pool
     CUdeviceptr      d_albedos      = 0;   // per-vertex rgb (may be null)
     CUdeviceptr      d_accum        = 0;   // HDR TAA accumulation buffer
+    CUdeviceptr      d_bounce       = 0;   // secondary-hit buffer (3*N float4)
     size_t           gbuf_bytes     = 0;
     size_t           res_bytes      = 0;
     size_t           light_bytes    = 0;
@@ -142,6 +144,7 @@ struct Renderer::Impl {
         if (d_lights)       cuMemFree(d_lights);
         if (d_albedos)      cuMemFree(d_albedos);
         if (d_accum)        cuMemFree(d_accum);
+        if (d_bounce)       cuMemFree(d_bounce);
         if (pipeline)       optixPipelineDestroy(pipeline);
         if (hitgroup_pg)    optixProgramGroupDestroy(hitgroup_pg);
         if (miss_pg)        optixProgramGroupDestroy(miss_pg);
@@ -254,7 +257,9 @@ struct Renderer::Impl {
         hitgroup_pg = pgs[3];
 
         OptixPipelineLinkOptions link_opts = {};
-        link_opts.maxTraceDepth = 1;
+        // Depth budget: rg_shade -> GI bounce (depth 1) -> its shadow ray
+        // (depth 2); allow one extra level of headroom for future bounces.
+        link_opts.maxTraceDepth = 3;
         OPTIX_CHECK(optixPipelineCreate(optix_ctx, &pco, &link_opts, pgs, 4,
                                          log, &log_size, &pipeline));
         if (log[0]) rlogf("Rstr2Core: [optix pipeline] %s", log);
@@ -317,6 +322,8 @@ bool Renderer::init(int width, int height, std::string& error) {
     CU_CHECK(cuMemAlloc(&impl_->d_res[0], res_bytes));
     CU_CHECK(cuMemAlloc(&impl_->d_res[1], res_bytes));
     CU_CHECK(cuMemAlloc(&impl_->d_accum, accum_bytes));
+    // Secondary-hit (GI bounce) buffer: 3 float4/pixel, same layout as gbuf.
+    CU_CHECK(cuMemAlloc(&impl_->d_bounce, gbuf_bytes));
     // Reservoirs must start empty (M=0) so the first frame has no bogus
     // temporal neighbour; accumulation starts black and fades in.
     CU_CHECK(cuMemsetD8(impl_->d_res[0], 0, res_bytes));
@@ -449,6 +456,7 @@ bool Renderer::resize(int width, int height, std::string& error) {
     if (im->d_res[0]) cuMemFree(im->d_res[0]);
     if (im->d_res[1]) cuMemFree(im->d_res[1]);
     if (im->d_accum)  cuMemFree(im->d_accum);
+    if (im->d_bounce) cuMemFree(im->d_bounce);
 
     const size_t out_bytes = static_cast<size_t>(width_) * height_ * 16u;
     im->gbuf_bytes = static_cast<size_t>(width_) * height_ * 3u * 16u;
@@ -458,6 +466,7 @@ bool Renderer::resize(int width, int height, std::string& error) {
     CU_CHECK(cuMemAlloc(&im->d_res[0], im->res_bytes));
     CU_CHECK(cuMemAlloc(&im->d_res[1], im->res_bytes));
     CU_CHECK(cuMemAlloc(&im->d_accum, out_bytes));
+    CU_CHECK(cuMemAlloc(&im->d_bounce, im->gbuf_bytes));
     // Fresh temporal state for the new resolution.
     CU_CHECK(cuMemsetD8(im->d_res[0], 0, im->res_bytes));
     CU_CHECK(cuMemsetD8(im->d_res[1], 0, im->res_bytes));
@@ -515,6 +524,8 @@ bool Renderer::render_frame(float* out_pixels, std::string& error) {
     p.exposure = (scene_.exposure > 0.0f) ? scene_.exposure : 1.0f;
     p.taa_clamp = 10.0f;   // blRstr-parity default firefly clamp
     p.accum = reinterpret_cast<Vec4F*>(im->d_accum);
+    p.bounce_buf = reinterpret_cast<Vec4F*>(im->d_bounce);
+    p.max_bounces = kMaxBounces;
 
     // World / film state.
     p.world_r = scene_.world_color[0];

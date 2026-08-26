@@ -141,6 +141,15 @@ per-triangle material albedo stays exact across material boundaries.
 - TAA reset: `accum_alpha = 1.0` on the first frame after any scene change
   (`scene_dirty`) or when TAA is off; otherwise `1/history` EMA with a 10.0
   firefly clamp. Jitter only when accumulating.
+- Phase 5 indirect GI (in `optix_kernels.cu`): `rg_shade` spawns
+  cosine-weighted secondary rays with ray-type `2` (`rt==2`). `__closesthit__`
+  routes those hits to `params.bounce_buf` (3 float4/pixel, same layout as
+  `gbuf`) so the primary G-buffer survives; a miss on `rt==2` is the
+  environment. `renderer.cpp`'s `maxTraceDepth` must stay `>= max_bounces + 2`
+  (bounce + its shadow). `kMaxBounces` (1 = one indirect bounce) sets
+  `params.max_bounces`; set to 0 for direct-only. The `/DELAYLOAD` + CI build
+  path is the only place the `.cu`->PTX->exe core can be compiled (no local
+  CUDA toolkit), so kernel changes are verified by pushing to GitHub Actions.
 
 ## Debugging
 
