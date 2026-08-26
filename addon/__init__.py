@@ -270,13 +270,40 @@ def _extract_scene(depsgraph, view_override=None, target_aspect=16.0 / 9.0):
     return vertices, indices, cam, lights, albedos
 
 
+def _read_color_input(inp):
+    """Read a Color socket as linear RGB, following an RGB-node link.
+
+    Blender stores Color-socket values in the scene's linear working space,
+    so no gamma conversion is applied. Returns (r, g, b) or None when the
+    socket cannot be read."""
+    try:
+        if getattr(inp, "is_linked", False):
+            try:
+                src = inp.links[0].from_node
+                if getattr(src, "type", "") == "RGB":
+                    c = src.outputs[0].default_value
+                    return (float(c[0]), float(c[1]), float(c[2]))
+            except Exception:
+                pass
+            # Linked to a texture / vertex color: fall back to the socket's
+            # own value as a best-effort approximation.
+            try:
+                c = inp.default_value
+                return (float(c[0]), float(c[1]), float(c[2]))
+            except Exception:
+                return None
+        c = inp.default_value
+        return (float(c[0]), float(c[1]), float(c[2]))
+    except Exception:
+        return None
+
+
 def _world_light(scene):
     """Uniform world/environment radiance (r, g, b, strength) or None.
 
-    Reads the World's Background node (the common case). Color is converted
-    from sRGB with the same gamma-2.0 approximation used for materials.
-    If the Color input is linked (env textures etc.) we fall back to white
-    times Strength so strength edits still respond live."""
+    Reads the World's Background node (the common case). Linked RGB nodes are
+    followed so solid environment colors actually reach the renderer; values
+    are kept in linear space (no sRGB conversion) to match the core."""
     try:
         world = scene.world
         if world is None:
@@ -289,28 +316,17 @@ def _world_light(scene):
                     inp_c = node.inputs.get("Color")
                     inp_s = node.inputs.get("Strength")
                     if inp_c is not None:
-                        if not inp_c.is_linked:
-                            c = inp_c.default_value
-                            color = (float(c[0]), float(c[1]), float(c[2]))
-                        elif getattr(inp_c, "links", None):
-                            try:
-                                src = inp_c.links[0].from_node
-                                if src.type == "RGB":
-                                    c = src.outputs[0].default_value
-                                    color = (float(c[0]), float(c[1]),
-                                             float(c[2]))
-                                # env/sky textures: keep white; only the
-                                # uniform approximation exists for now.
-                            except Exception:
-                                pass
-                    if inp_s is not None and not inp_s.is_linked:
+                        c = _read_color_input(inp_c)
+                        if c is not None:
+                            color = c
+                    if inp_s is not None and not getattr(inp_s, "is_linked", False):
                         strength = float(inp_s.default_value)
                     break
         else:
-            c = world.color
-            color = (float(c[0]), float(c[1]), float(c[2]))
-        lin = tuple(x * x for x in color)
-        return (lin[0], lin[1], lin[2], strength)
+            c = getattr(world, "color", None)
+            if c is not None:
+                color = (float(c[0]), float(c[1]), float(c[2]))
+        return (color[0], color[1], color[2], strength)
     except Exception:
         return None
 
@@ -318,21 +334,24 @@ def _world_light(scene):
 def _material_rgb(mat):
     """Linear base-color RGB for a material (Principled Base Color preferred).
 
-    Note: Blender colors are sRGB-encoded; converting exactly would need the
-    scene view transform. We approximate with the common gamma-2.0 shortcut,
-    which lands close enough for preview rendering."""
+    Blender Color sockets are already in the scene's linear working space, so
+    the value is passed through unchanged. Linked RGB nodes are followed; when
+    nothing is wired we fall back to the material's diffuse color."""
     try:
         if mat is not None and getattr(mat, "use_nodes", False) and mat.node_tree:
             for node in mat.node_tree.nodes:
                 if node.type == "BSDF_PRINCIPLED":
                     inp = node.inputs.get("Base Color")
-                    if inp is not None and not inp.is_linked:
-                        c = inp.default_value
-                        return (float(c[0]) ** 2.0, float(c[1]) ** 2.0,
-                                float(c[2]) ** 2.0)
+                    if inp is not None:
+                        c = _read_color_input(inp)
+                        if c is not None:
+                            return c
                     break
-        c = mat.diffuse_color
-        return (float(c[0]) ** 2.0, float(c[1]) ** 2.0, float(c[2]) ** 2.0)
+        if mat is not None:
+            d = getattr(mat, "diffuse_color", None)
+            if d is not None:
+                return (float(d[0]), float(d[1]), float(d[2]))
+        return (0.8, 0.8, 0.82)
     except Exception:
         return (0.8, 0.8, 0.82)
 
@@ -430,14 +449,12 @@ class Rstr2Engine(RenderEngine):
         # just when the camera moved.
         try:
             self._target_size = (width, height)
-            sig = self._scene_sig(depsgraph)
+            rv3d = getattr(context, "region_data", None)
+            cam = (self._camera_from_rv3d(rv3d, width, height)
+                   if rv3d is not None else None)
+            sig = self._scene_sig(depsgraph, cam)
             if self._geom_dirty or sig != self._last_cam_sig:
-                view_override = None
-                rv3d = getattr(context, "region_data", None)
-                if (rv3d is not None and
-                        rv3d.view_perspective != 'CAMERA'):
-                    view_override = self._viewport_camera(context, width, height)
-                self._sync_scene(depsgraph, view_override)
+                self._sync_scene(depsgraph, cam)
                 self._last_cam_sig = sig
                 self._geom_dirty = False
         except Exception as e:
@@ -510,42 +527,47 @@ class Rstr2Engine(RenderEngine):
     # ------------------------------------------------------------------
     # Phase 3 scene bridge helpers
     # ------------------------------------------------------------------
-    def _viewport_camera(self, context, width, height):
-        """Camera dict from the current 3D viewport orbit (free navigation).
+    def _camera_from_rv3d(self, rv3d, width, height):
+        """Exact viewport camera from Blender's RegionView3D matrices.
 
-        Blender orbits around view_location at view_distance along -Z of
-        view_rotation; the eye sits one distance behind the pivot. Vertical
-        FOV derives from the viewport lens (36mm horizontal sensor fit)."""
-        import math
-        from mathutils import Vector
-
-        rv3d = getattr(context, "region_data", None)
-        if rv3d is None:
-            return None
-        q = rv3d.view_rotation
-        forward = q @ Vector((0.0, 0.0, -1.0))
-        right = q @ Vector((1.0, 0.0, 0.0))
-        up = q @ Vector((0.0, 1.0, 0.0))
-        pivot = Vector(rv3d.view_location)
-        origin = pivot - forward * float(rv3d.view_distance)
-        lens = 50.0
-        sd = getattr(context, "space_data", None)
-        if sd is not None and getattr(sd, "lens", 0):
-            lens = float(sd.lens)
-        aspect = max(float(width), 1.0) / max(float(height), 1.0)
-        tan_half_v = (18.0 / lens) / aspect   # 36mm sensor -> 18mm half-width
+        Deriving origin/right/up/forward and the vertical FOV directly from
+        rv3d.view_matrix (world->view) and rv3d.window_matrix (view->clip)
+        makes the rendered frame match the viewport framing exactly - including
+        the active camera's sensor fit and shift - instead of re-deriving FOV
+        by hand. This keeps the rendered mesh aligned with the outline and,
+        because the camera now changes on every orbit, lets view_draw re-sync
+        the core live (see _scene_sig)."""
+        W = rv3d.window_matrix          # view -> clip (projection)
+        vm = rv3d.view_matrix           # world -> view
+        fy = float(W[1][1])
+        if abs(fy) < 1e-6:
+            fy = 1.0
+        tan_half_fov_y = 1.0 / fy
+        # Camera shift (NDC offset) encoded in the projection's 3rd column.
+        shift_x = float(W[0][2]) * 0.5
+        shift_y = float(W[1][2]) * 0.5
+        view_inv = vm.inverted()
+        origin = (float(view_inv[0][3]), float(view_inv[1][3]),
+                  float(view_inv[2][3]))
+        # World-space basis = columns of the rotation part of view_matrix.
+        right = (float(vm[0][0]), float(vm[1][0]), float(vm[2][0]))
+        up = (float(vm[0][1]), float(vm[1][1]), float(vm[2][1]))
+        forward = (-float(vm[0][2]), -float(vm[1][2]), -float(vm[2][2]))
         return {
-            "origin": tuple(origin),
-            "right": (right.x, right.y, right.z),
-            "up": (up.x, up.y, up.z),
-            "forward": (forward.x, forward.y, forward.z),
-            "tan_half_fov_y": tan_half_v,
+            "origin": origin,
+            "right": right,
+            "up": up,
+            "forward": forward,
+            "tan_half_fov_y": tan_half_fov_y,
+            "shift_x": shift_x,
+            "shift_y": shift_y,
         }
 
-    def _scene_sig(self, depsgraph):
+    def _scene_sig(self, depsgraph, cam=None):
         """Signature of everything that should trigger a re-publish: camera,
         world light, render settings and light objects. Compared each redraw
-        so edits like World color/strength reach the core live."""
+        so edits like World color/strength (and viewport orbit) reach the core
+        live."""
         sig = self._camera_sig(depsgraph)
         extras = []
         world = _world_light(depsgraph.scene)
@@ -558,6 +580,20 @@ class Rstr2Engine(RenderEngine):
             int(getattr(sprops, "taa_history", 20)),
             bool(getattr(depsgraph.scene.render, "film_transparent", False)),
         ]
+        if cam is not None:
+            extras += [
+                round(float(cam["origin"][0]), 4), round(float(cam["origin"][1]), 4),
+                round(float(cam["origin"][2]), 4),
+                round(float(cam["right"][0]), 4), round(float(cam["right"][1]), 4),
+                round(float(cam["right"][2]), 4),
+                round(float(cam["up"][0]), 4), round(float(cam["up"][1]), 4),
+                round(float(cam["up"][2]), 4),
+                round(float(cam["forward"][0]), 4), round(float(cam["forward"][1]), 4),
+                round(float(cam["forward"][2]), 4),
+                round(float(cam["tan_half_fov_y"]), 5),
+                round(float(cam.get("shift_x", 0.0)), 5),
+                round(float(cam.get("shift_y", 0.0)), 5),
+            ]
         lights = []
         for obj in depsgraph.objects:
             if obj.type != "LIGHT":

@@ -125,20 +125,37 @@ def principled_material(rgb):
 
 
 class MaterialColorTests(unittest.TestCase):
-    def test_principled_base_color_squared_to_linear(self):
+    def test_principled_base_color_is_linear_passthrough(self):
+        # Color sockets are already linear in Blender; no gamma is applied.
         mat = principled_material((1.0, 0.5, 0.25))
         r, g, b = MOD._material_rgb(mat)
         self.assertAlmostEqual(r, 1.0)
-        self.assertAlmostEqual(g, 0.25)
-        self.assertAlmostEqual(b, 0.0625)
+        self.assertAlmostEqual(g, 0.5)
+        self.assertAlmostEqual(b, 0.25)
 
     def test_non_node_falls_back_to_diffuse(self):
         mat = types.SimpleNamespace(use_nodes=False,
                                     diffuse_color=(0.5, 1.0, 0.25, 1.0))
         r, g, b = MOD._material_rgb(mat)
-        self.assertAlmostEqual(r, 0.25)
+        self.assertAlmostEqual(r, 0.5)
         self.assertAlmostEqual(g, 1.0)
-        self.assertAlmostEqual(b, 0.0625)
+        self.assertAlmostEqual(b, 0.25)
+
+    def test_linked_rgb_node_is_followed(self):
+        rgb = types.SimpleNamespace(
+            type="RGB",
+            outputs=[types.SimpleNamespace(default_value=(0.2, 0.4, 0.6, 1.0))])
+        inp = types.SimpleNamespace(is_linked=True,
+                                   default_value=(1.0, 1.0, 1.0, 1.0),
+                                   links=[types.SimpleNamespace(from_node=rgb)])
+        from_node = types.SimpleNamespace(type="BSDF_PRINCIPLED",
+                                          inputs={"Base Color": inp})
+        mat = types.SimpleNamespace(use_nodes=True,
+                                    node_tree=types.SimpleNamespace(nodes=[from_node]))
+        r, g, b = MOD._material_rgb(mat)
+        self.assertAlmostEqual(r, 0.2)
+        self.assertAlmostEqual(g, 0.4)
+        self.assertAlmostEqual(b, 0.6)
 
     def test_none_material_gives_default(self):
         self.assertEqual(MOD._material_rgb(None), (0.8, 0.8, 0.82))
@@ -163,17 +180,19 @@ class WorldLightTests(unittest.TestCase):
     def test_unlinked_color_and_strength(self):
         s = self._scene(self._background((0.5, 1.0, 2.0), 3.0, linked=False))
         r, g, b, k = MOD._world_light(s)
-        self.assertAlmostEqual(r, 0.25 * 1.0)
+        self.assertAlmostEqual(r, 0.5)
         self.assertAlmostEqual(g, 1.0)
-        self.assertAlmostEqual(b, 4.0)
+        self.assertAlmostEqual(b, 2.0)
         self.assertAlmostEqual(k, 3.0)
 
-    def test_linked_color_falls_back_white_but_strength_honored(self):
+    def test_linked_color_not_forced_white(self):
+        # A linked Color input must not collapse to white; the socket's own
+        # value (or linked RGB node) is read as linear.
         s = self._scene(self._background((9, 9, 9), 2.0, linked=True))
         r, g, b, k = MOD._world_light(s)
-        self.assertAlmostEqual(r, 1.0)
-        self.assertAlmostEqual(g, 1.0)
-        self.assertAlmostEqual(b, 1.0)
+        self.assertAlmostEqual(r, 9.0)
+        self.assertAlmostEqual(g, 9.0)
+        self.assertAlmostEqual(b, 9.0)
         self.assertAlmostEqual(k, 2.0)
 
     def test_no_world_returns_none(self):

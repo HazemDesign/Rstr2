@@ -435,18 +435,15 @@ extern "C" __global__ void __raygen__rg_shade() {
 
     uint32_t NL = params.light_count;
 
-    // Fallback shading when no analytic lights are provided (default scene).
-    if (NL == 0u) {
-        float3 ambient = make_f3(0.0f, 0.0f, 0.0f);
-        if (params.world_strength > 0.0f) {
-            float ws = params.world_strength;
-            ambient = make_float3(albedo.x * ws * params.world_r,
-                                  albedo.y * ws * params.world_g,
-                                  albedo.z * ws * params.world_b);
-        }
+    // Cheap fallback when there is neither an analytic light nor an environment:
+    // shade with a fixed key so the default (empty) scene still shows something.
+    // When an environment exists, fall through to the GI bounce loop below,
+    // which turns the environment into indirect/IBL fill (fixes "GI only works
+    // once a light is added").
+    if (NL == 0u && params.world_strength <= 0.0f) {
         float3 key = normalize3(make_f3(0.3f, 0.7f, -0.6f));
         float ndl = max(dot3(N, key), 0.0f);
-        float3 col = albedo * (0.25f + 0.75f * ndl) + ambient;
+        float3 col = albedo * (0.25f + 0.75f * ndl);
         accumulate_and_present(pidx, col, 1.0f);
         return;
     }
