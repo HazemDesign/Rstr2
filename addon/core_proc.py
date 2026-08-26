@@ -31,11 +31,13 @@ def _candidate_dirs():
 
 
 def _find_core(filename):
+    """Return a Path to filename, or None. Paths are returned (not str) so
+    callers can use .parent on the executable location."""
     try:
         for d in _candidate_dirs():
             p = d / filename
             if p.is_file():
-                return str(p)
+                return p
     except Exception:
         pass
     return None

@@ -24,7 +24,12 @@ if (-not (Test-Path $dstRoot)) {
 
 $dst = Join-Path $dstRoot "rstr2"
 Write-Host "Installing addon: $srcAdd -> $dst"
-if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
+Get-Process Rstr2Core -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+if (Test-Path $dst) {
+    try { Remove-Item $dst -Recurse -Force -ErrorAction Stop }
+    catch { Write-Warning "Could not delete old addon dir (file locked?). Close Blender and rerun."; throw }
+}
 New-Item -ItemType Directory -Path $dst | Out-Null
 Copy-Item (Join-Path $srcAdd "*.py") $dst -Force
 
@@ -46,3 +51,4 @@ foreach ($f in @("Rstr2Core.exe", "optix_kernels.ptx")) {
 $blinfo = Get-Content (Join-Path $dst "__init__.py") | Select-String '"version": \(([^)]+)\)'
 Write-Host "Installed addon version:" $blinfo.Matches[0].Groups[1].Value
 Write-Host "Done. Restart Blender (or reload the addon) to pick it up."
+

@@ -609,7 +609,8 @@ class Rstr2Engine(RenderEngine):
         try:
             vertices, indices, camera, lights, albedos = scene
 
-            # Scene-level render settings (blRstr-parity panel + film).            sprops = getattr(depsgraph.scene, "rstr2", None)
+            # Scene-level render settings (blRstr-parity panel + film).
+            sprops = getattr(depsgraph.scene, "rstr2", None)
             sflags = 1 if getattr(sprops, "use_taa", True) else 0
             if getattr(depsgraph.scene.render, "film_transparent", False):
                 sflags |= 2  # FLAG_FILM_TRANSPARENT
