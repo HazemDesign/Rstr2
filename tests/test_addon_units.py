@@ -182,6 +182,10 @@ class WorldLightTests(unittest.TestCase):
 
 class CorePathResolutionTests(unittest.TestCase):
     def test_repo_bin_resolves_exe(self):
+        if not (os.path.isfile(os.path.join(REPO_ROOT, "bin", "Rstr2Core.exe"))
+                or os.path.isfile(os.path.join(ADDON_DIR, "bin",
+                                               "Rstr2Core.exe"))):
+            self.skipTest("no core binary present (fresh checkout / CI)")
         exe = MOD.core_proc.core_exe_path()
         self.assertIsNotNone(exe, "exe must resolve from repo or addon-local bin")
         self.assertTrue(str(exe).endswith("Rstr2Core.exe"))
