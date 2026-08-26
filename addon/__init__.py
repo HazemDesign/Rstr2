@@ -60,6 +60,97 @@ def _resize_nearest(arr, width, height):
     return arr[np.ix_(ys, xs)]
 
 
+def camera_params(cd, target_aspect):
+    """Pure camera math from a Blender Camera data-block.
+
+    Returns dict(tan_half_fov_y, shift_x, shift_y) honoring lens, sensor
+    fit/size and frame offsets for the given render-target aspect (w/h)."""
+    import math
+
+    lens = max(float(getattr(cd, "lens", 50.0)), 1e-4)
+    fit = getattr(cd, "sensor_fit", "AUTO")
+    sw = float(getattr(cd, "sensor_width", 36.0))
+    sh = float(getattr(cd, "sensor_height", 24.0))
+    if fit == "VERTICAL":
+        tan_v = (sh * 0.5) / lens
+    elif fit == "HORIZONTAL":
+        tan_h = (sw * 0.5) / lens
+        tan_v = tan_h / max(target_aspect, 1e-4)
+    else:  # AUTO: vertical fit unless the target is taller than wide
+        if target_aspect >= 1.0:
+            tan_v = (sh * 0.5) / lens
+        else:
+            tan_v = ((sw * 0.5) / lens) / max(target_aspect, 1e-4)
+    return {
+        "tan_half_fov_y": tan_v,
+        "shift_x": float(getattr(cd, "shift_x", 0.0)),
+        "shift_y": float(getattr(cd, "shift_y", 0.0)),
+    }
+
+
+def typed_light_row(mw, ld):
+    """Build one 16-float typed-light row from a light object's world matrix
+    and data-block (see scene_shm LIGHT_FLOATS for the layout). Pure/untested
+    against Blender itself - unit tests cover the math."""
+    import math
+
+    pos = (float(mw[0][3]), float(mw[1][3]), float(mw[2][3]))
+    energy = float(getattr(ld, "energy", 10.0))
+    col = ld.color
+    cr, cg, cb = float(col[0]), float(col[1]), float(col[2])
+    # Emission direction = local -Z of the light object (Blender convention).
+    fwd = (-float(mw[0][2]), -float(mw[1][2]), -float(mw[2][2]))
+    flen = math.sqrt(fwd[0] ** 2 + fwd[1] ** 2 + fwd[2] ** 2)
+    if flen > 1e-9:
+        fwd = (fwd[0] / flen, fwd[1] / flen, fwd[2] / flen)
+    else:
+        fwd = (0.0, -1.0, 0.0)
+    ltype = getattr(ld, "type", "POINT")
+
+    if ltype == "SUN":
+        intensity = energy * 3.0  # sun strength ~ irradiance; brighten a touch
+        return [pos[0], pos[1], pos[2], 1.0,
+                fwd[0], fwd[1], fwd[2], intensity,
+                cr, cg, cb, float(getattr(ld, "angle", 0.0)), 0.0,
+                0.0, 0.0, 0.0]
+    if ltype == "SPOT":
+        spot_size = float(getattr(ld, "spot_size", 0.8))
+        blend = float(getattr(ld, "spot_blend", 0.15))
+        cos_outer = math.cos(spot_size * 0.5)
+        cos_inner = math.cos(spot_size * 0.5 * max(1.0 - blend, 0.001))
+        intensity = energy * 0.1
+        # az carries shadow_soft_size (spherical emitter radius).
+        return [pos[0], pos[1], pos[2], 2.0,
+                fwd[0], fwd[1], fwd[2], intensity,
+                cr, cg, cb, cos_outer, cos_inner,
+                0.0, 0.0, float(getattr(ld, "shadow_soft_size", 0.0))]
+    if ltype == "AREA":
+        size_x = float(getattr(ld, "size", 1.0))
+        shape = getattr(ld, "shape", "SQUARE")
+        size_y = float(getattr(ld, "size_y", size_x)) if shape == "RECTANGLE" else size_x
+        ref = (0.0, 1.0, 0.0) if abs(fwd[1]) < 0.9 else (1.0, 0.0, 0.0)
+        ax = (ref[1] * fwd[2] - ref[2] * fwd[1],
+              ref[2] * fwd[0] - ref[0] * fwd[2],
+              ref[0] * fwd[1] - ref[1] * fwd[0])
+        alen = math.sqrt(ax[0] ** 2 + ax[1] ** 2 + ax[2] ** 2)
+        if alen > 1e-9:
+            ax = (ax[0] / alen, ax[1] / alen, ax[2] / alen)
+        else:
+            ax = (1.0, 0.0, 0.0)
+        intensity = energy * 0.1
+        return [pos[0], pos[1], pos[2], 3.0,
+                fwd[0], fwd[1], fwd[2], intensity,
+                cr, cg, cb, size_x, size_y,
+                ax[0], ax[1], ax[2]]
+    # POINT (default)
+    intensity = energy * 0.1  # scale Blender energy into our radiance range
+    # ax carries shadow_soft_size (spherical emitter radius).
+    return [pos[0], pos[1], pos[2], 0.0,
+            0.0, 0.0, 0.0, intensity,
+            cr, cg, cb, 0.0, 0.0,
+            float(getattr(ld, "shadow_soft_size", 0.0)), 0.0, 0.0]
+
+
 def _extract_scene(depsgraph, view_override=None, target_aspect=16.0 / 9.0):
     """Build (vertices, indices, camera, lights, albedos) for the native core.
 
@@ -104,34 +195,10 @@ def _extract_scene(depsgraph, view_override=None, target_aspect=16.0 / 9.0):
         forward = (-back[0], -back[1], -back[2])
 
         cd = camera.data
-        lens = max(float(getattr(cd, "lens", 50.0)), 1e-4)
-        fit = getattr(cd, "sensor_fit", "AUTO")
-        sw = float(getattr(cd, "sensor_width", 36.0))
-        sh = float(getattr(cd, "sensor_height", 24.0))
-        if fit == "VERTICAL":
-            tan_v = (sh * 0.5) / lens
-        elif fit == "HORIZONTAL":
-            tan_h = (sw * 0.5) / lens
-            tan_v = tan_h / max(target_aspect, 1e-4)
-        else:  # AUTO: vertical fit unless the target is taller than wide
-            if target_aspect >= 1.0:
-                tan_v = (sh * 0.5) / lens
-            else:
-                tan_v = ((sw * 0.5) / lens) / max(target_aspect, 1e-4)
-
-        # Camera frame offsets (Blender shift units of the largest sensor dim).
-        sx = float(getattr(cd, "shift_x", 0.0))
-        sy = float(getattr(cd, "shift_y", 0.0))
-
-        cam = {
-            "origin": origin,
-            "right": right,
-            "up": up,
-            "forward": forward,
-            "tan_half_fov_y": tan_v,
-            "shift_x": sx,
-            "shift_y": sy,
-        }
+        cam = dict(
+            origin=origin, right=right, up=up, forward=forward,
+            **camera_params(cd, target_aspect)
+        )
 
     # --- World-space triangle soup from all MESH objects -----------------
     # Non-indexed soup: one vertex per triangle corner, so each triangle owns
@@ -195,64 +262,7 @@ def _extract_scene(depsgraph, view_override=None, target_aspect=16.0 / 9.0):
     for obj in depsgraph.objects:
         if obj.type != "LIGHT":
             continue
-        ld = obj.data
-        mw = obj.matrix_world
-        pos = (float(mw[0][3]), float(mw[1][3]), float(mw[2][3]))
-        energy = float(getattr(ld, "energy", 10.0))
-        col = ld.color
-        cr, cg, cb = float(col[0]), float(col[1]), float(col[2])
-        # Emission direction = local -Z of the light object (Blender convention).
-        fwd = (-float(mw[0][2]), -float(mw[1][2]), -float(mw[2][2]))
-        flen = math.sqrt(fwd[0] ** 2 + fwd[1] ** 2 + fwd[2] ** 2)
-        if flen > 1e-9:
-            fwd = (fwd[0] / flen, fwd[1] / flen, fwd[2] / flen)
-        else:
-            fwd = (0.0, -1.0, 0.0)
-        ltype = getattr(ld, "type", "POINT")
-
-        if ltype == "SUN":
-            intensity = energy * 3.0  # sun strength ~ irradiance; brighten a touch
-            row = [pos[0], pos[1], pos[2], 1.0,
-                   fwd[0], fwd[1], fwd[2], intensity,
-                   cr, cg, cb, float(getattr(ld, "angle", 0.0)), 0.0,
-                   0.0, 0.0, 0.0]
-        elif ltype == "SPOT":
-            spot_size = float(getattr(ld, "spot_size", 0.8))
-            blend = float(getattr(ld, "spot_blend", 0.15))
-            cos_outer = math.cos(spot_size * 0.5)
-            cos_inner = math.cos(spot_size * 0.5 * max(1.0 - blend, 0.001))
-            intensity = energy * 0.1
-            # az carries shadow_soft_size (spherical emitter radius).
-            row = [pos[0], pos[1], pos[2], 2.0,
-                   fwd[0], fwd[1], fwd[2], intensity,
-                   cr, cg, cb, cos_outer, cos_inner,
-                   0.0, 0.0, float(getattr(ld, "shadow_soft_size", 0.0))]
-        elif ltype == "AREA":
-            size_x = float(getattr(ld, "size", 1.0))
-            shape = getattr(ld, "shape", "SQUARE")
-            size_y = float(getattr(ld, "size_y", size_x)) if shape == "RECTANGLE" else size_x
-            ref = (0.0, 1.0, 0.0) if abs(fwd[1]) < 0.9 else (1.0, 0.0, 0.0)
-            ax = (ref[1] * fwd[2] - ref[2] * fwd[1],
-                  ref[2] * fwd[0] - ref[0] * fwd[2],
-                  ref[0] * fwd[1] - ref[1] * fwd[0])
-            alen = math.sqrt(ax[0] ** 2 + ax[1] ** 2 + ax[2] ** 2)
-            if alen > 1e-9:
-                ax = (ax[0] / alen, ax[1] / alen, ax[2] / alen)
-            else:
-                ax = (1.0, 0.0, 0.0)
-            intensity = energy * 0.1
-            row = [pos[0], pos[1], pos[2], 3.0,
-                   fwd[0], fwd[1], fwd[2], intensity,
-                   cr, cg, cb, size_x, size_y,
-                   ax[0], ax[1], ax[2]]
-        else:  # POINT (default)
-            intensity = energy * 0.1  # scale Blender energy into our radiance range
-            # ax carries shadow_soft_size (spherical emitter radius).
-            row = [pos[0], pos[1], pos[2], 0.0,
-                   0.0, 0.0, 0.0, intensity,
-                   cr, cg, cb, 0.0, 0.0,
-                   float(getattr(ld, "shadow_soft_size", 0.0)), 0.0, 0.0]
-        light_rows.append(row)
+        light_rows.append(typed_light_row(obj.matrix_world, obj.data))
 
     lights = (np.array(light_rows, dtype=np.float32).reshape(-1, 16)
               if light_rows else np.empty((0, 16), dtype=np.float32))
@@ -282,13 +292,17 @@ def _world_light(scene):
                         if not inp_c.is_linked:
                             c = inp_c.default_value
                             color = (float(c[0]), float(c[1]), float(c[2]))
-                        else:
-                            src = inp_c.links[0].from_node
-                            if src.type == "RGB" and hasattr(src, "outputs"):
-                                c = src.outputs[0].default_value
-                                color = (float(c[0]), float(c[1]), float(c[2]))
-                            # env/sky textures: keep white; only the uniform
-                            # approximation is supported for now.
+                        elif getattr(inp_c, "links", None):
+                            try:
+                                src = inp_c.links[0].from_node
+                                if src.type == "RGB":
+                                    c = src.outputs[0].default_value
+                                    color = (float(c[0]), float(c[1]),
+                                             float(c[2]))
+                                # env/sky textures: keep white; only the
+                                # uniform approximation exists for now.
+                            except Exception:
+                                pass
                     if inp_s is not None and not inp_s.is_linked:
                         strength = float(inp_s.default_value)
                     break
