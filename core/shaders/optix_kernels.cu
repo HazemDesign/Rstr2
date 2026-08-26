@@ -34,6 +34,10 @@ static __device__ __forceinline__ float3 make_f3(float x, float y, float z) {
 static __device__ __forceinline__ float3 operator+(const float3& a, const float3& b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
+static __device__ __forceinline__ float3& operator+=(float3& a, const float3& b) {
+    a.x += b.x; a.y += b.y; a.z += b.z;
+    return a;
+}
 static __device__ __forceinline__ float3 operator-(const float3& a, const float3& b) {
     return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
