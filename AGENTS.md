@@ -5,10 +5,26 @@ Rstr2 is a from-scratch real-time ray traced render engine for Blender
 many-light rendering). Same architecture as blRstr: a Python addon launches a
 separate native renderer process and talks to it over Windows shared memory.
 
-The native core is **OptiX** (NVIDIA), not DXR anymore: an early DXR 1.0/D3D12
-implementation was replaced by OptiX 9 + CUDA driver API (see git history).
-It renders ReSTIR DI direct lighting (typed light pool + temporal reservoir
-reuse) with TAA accumulation and publishes linear RGBA32F frames.
+The native core has **two backends** that speak the SAME shared-memory
+protocol (`Local\Rstr2Scene_v1` in, `Local\Rstr2Frame_v1` out), so the addon
+and GPU tests are identical for both:
+- `Rstr2Core.exe` — **OptiX** (NVIDIA), the default. OptiX 9 + CUDA driver
+  API (an early DXR 1.0/D3D12 implementation was replaced by OptiX; see git
+  history). Renders ReSTIR DI direct lighting (typed light pool + temporal
+  reservoir reuse) with TAA accumulation.
+- `Rstr2Dxr.exe` — **DXR 1.1** (cross-vendor, any DXR-capable GPU incl.
+  NVIDIA). Added so the addon works on non-NVIDIA GPUs. Built only with
+  `-DBUILD_DXR=ON` (needs the Windows SDK `dxc.exe`); requires `dxr_shade.cso`
+  next to the exe. `core/src/dxr_renderer.cpp` + `dxr_main.cpp` + `shaders`/
+  `dxr_shade.hlsl` mirror the OptiX behavior (direct lighting over the typed
+  light pool + 1 GI bounce + environment, CPU-side EMA TAA) at a slightly
+  lower feature set (no ReSTIR reservoirs: a per-light loop gives the same
+  expected image).
+
+The addon auto-selects: OptiX on NVIDIA, DXR elsewhere — override via the
+`backend` enum in the Rstr2 render settings (auto / optix / dxr).
+`core_proc.py` locates the right exe and falls back to OptiX if the chosen
+backend binary is missing.
 
 ## Layout
 
@@ -29,7 +45,12 @@ core/
                       resize, two-pass optixLaunch per frame
   src/shared_mem.*    SharedMem (frame writer) + SceneMem (scene reader)
   src/optix_params.h  Params/Light/Reservoir structs shared host<->device
+  src/dxr_renderer.*  DXR 1.1 backend (D3D12 device, BLAS/TLAS, two-pass
+                      dispatch, readback + CPU EMA), same Renderer interface
+  src/dxr_main.cpp    DXR entry point (drop-in for main.cpp)
   shaders/optix_kernels.cu  nvcc -> PTX; rg_primary + rg_shade raygen passes
+  src/dxr_shade.hlsl  dxc -> dxr_shade.cso; rg_primary + rg_shade raygen,
+                      CH/Miss for primary/shadow/secondary ray types
 tools/update-addon.ps1  Installs addon/*.py + bin/{exe,ptx} into Blender's
                         addons dir (run with Blender CLOSED)
 tests/smoke_register.py Headless registration smoke test (Blender --background)

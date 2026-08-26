@@ -53,6 +53,32 @@ def core_ptx_path():
     return _find_core("optix_kernels.ptx")
 
 
+def dxr_exe_path():
+    """Return the path to Rstr2Dxr.exe (DXR backend), or None.
+
+    The DXR backend additionally requires dxr_shade.cso next to the exe; if
+    that is missing we return None so callers fall back to OptiX (or a test
+    pattern) instead of a hard failure.
+    """
+    exe = _find_core("Rstr2Dxr.exe")
+    if exe is None:
+        return None
+    if not (exe.parent / "dxr_shade.cso").is_file():
+        return None
+    return exe
+
+
+def core_exe_path_for(backend="optix"):
+    """Return the core executable for the requested backend.
+
+    backend: "optix" -> Rstr2Core.exe, "dxr" -> Rstr2Dxr.exe.
+    Returns None if the requested binary (and its shader blob) is missing.
+    """
+    if backend == "dxr":
+        return dxr_exe_path()
+    return core_exe_path()
+
+
 class CoreProcess:
     """Manages the lifetime of a single Rstr2Core.exe instance."""
 
@@ -61,21 +87,31 @@ class CoreProcess:
         self._log = None
 
     # ------------------------------------------------------------------
-    def launch(self, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT):
+    def launch(self, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT, backend="optix"):
         """Spawn the core. No-op (returns False) if already running.
 
+        backend: "optix" (Rstr2Core.exe, NVIDIA/OptiX) or "dxr"
+        (Rstr2Dxr.exe, cross-vendor DXR 1.1). If the requested backend binary
+        is missing, falls back to OptiX; if that is also missing, returns
+        False (the addon then uses its test pattern).
+
         Returns True if a new process was started, False otherwise. The
-        child's stdout/stderr are redirected to bin/Rstr2Core.log so launch
+        child's stdout/stderr are redirected to bin/<exe>.log so launch
         and runtime diagnostics are visible even though it runs windowless.
         """
         if self.poll_alive():
             return False
 
-        exe = core_exe_path()
+        exe = core_exe_path_for(backend)
+        if exe is None and backend == "dxr":
+            # Requested DXR but the binary/shader is missing: try OptiX.
+            exe = core_exe_path()
+            if exe is not None:
+                backend = "optix"
         if exe is None:
             return False
 
-        log_path = exe.parent / "Rstr2Core.log"
+        log_path = exe.parent / (exe.stem + ".log")
         try:
             self._log = open(str(log_path), "wb", buffering=0)
         except Exception:

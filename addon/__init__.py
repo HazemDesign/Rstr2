@@ -688,6 +688,40 @@ class Rstr2Engine(RenderEngine):
     # ------------------------------------------------------------------
     # Phase 2 core bridge helpers
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Backend selection (OptiX vs cross-vendor DXR 1.1)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _detect_vendor():
+        """Return 'nvidia' if the active GPU appears to be NVIDIA, else 'other'.
+
+        Used to auto-pick the OptiX backend (NVIDIA only) vs the DXR 1.1
+        backend (any DXR-capable GPU). Best-effort; defaults to 'other' so a
+        detection failure falls back to the cross-vendor path rather than
+        silently picking an NVIDIA-only binary.
+        """
+        try:
+            import GPU
+            renderer = GPU.platform.renderer_get().lower()
+            if "nvidia" in renderer:
+                return "nvidia"
+        except Exception:
+            pass
+        return "other"
+
+    def _resolve_backend(self):
+        """Resolve the requested backend setting to 'optix' or 'dxr'."""
+        setting = "auto"
+        try:
+            import bpy
+            setting = bpy.context.scene.rstr2.backend
+        except Exception:
+            setting = "auto"
+        if setting in ("optix", "dxr"):
+            return setting
+        # Auto: NVIDIA -> OptiX, anything else -> DXR.
+        return "optix" if self._detect_vendor() == "nvidia" else "dxr"
+
     def _ensure_core(self):
         """Lazily launch the native core and open its frame mapping.
 
@@ -700,19 +734,24 @@ class Rstr2Engine(RenderEngine):
             try:
                 from . import core_proc
 
-                exe = core_proc.core_exe_path()
-                ptx = core_proc.core_ptx_path()
+                backend = self._resolve_backend()
+                exe = core_proc.core_exe_path_for(backend)
                 if exe is None:
-                    self._core_ok = False
-                    self._core_msg = "Rstr2Core.exe missing in bin/"
-                elif ptx is None:
-                    self._core_ok = False
-                    self._core_msg = "optix_kernels.ptx missing in bin/"
-                else:
+                    if backend == "dxr":
+                        self._core_ok = False
+                        self._core_msg = "Rstr2Dxr.exe/dxr_shade.cso missing in bin/ (falling back)"
+                        # Retry once with OptiX; if that is also missing the
+                        # test pattern takes over.
+                        exe = core_proc.core_exe_path_for("optix")
+                        backend = "optix"
+                    if exe is None:
+                        self._core_ok = False
+                        self._core_msg = "no render backend binary found in bin/"
+                if exe is not None:
                     self._core = core_proc.CoreProcess()
-                    self._core.launch()
+                    self._core.launch(backend=backend)
                     self._core_ok = True
-                    self._core_msg = "core launched"
+                    self._core_msg = "core launched (%s)" % backend
             except Exception as e:
                 self._core_ok = False
                 self._core_msg = "core launch err: %s" % str(e)[:60]
@@ -799,6 +838,17 @@ class Rstr2SceneSettings(bpy.types.PropertyGroup):
                     "slower to react",
         min=1, max=128, default=20,
     )
+    backend: bpy.props.EnumProperty(
+        name="Render Backend",
+        description="GPU backend. Auto picks OptiX on NVIDIA and the "
+                    "cross-vendor DXR 1.1 backend otherwise",
+        items=[
+            ("auto", "Auto (vendor detect)", "OptiX on NVIDIA, DXR elsewhere"),
+            ("optix", "OptiX (NVIDIA)", "Requires an NVIDIA GPU + driver"),
+            ("dxr", "DXR 1.1 (cross-vendor)", "Any DXR-capable GPU"),
+        ],
+        default="auto",
+    )
 
 
 class RSTR2_PT_settings(bpy.types.Panel):
@@ -821,6 +871,8 @@ class RSTR2_PT_settings(bpy.types.Panel):
             col.prop(props, "taa_history")
         col = layout.column()
         col.prop(props, "exposure")
+        col = layout.column()
+        col.prop(props, "backend")
 
 
 def register():
